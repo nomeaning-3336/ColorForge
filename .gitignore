@@ -1,0 +1,9 @@
+# JUCE checkouts (fetched by make.bat)
+/JUCE/
+/JUCE7/
+
+# Build output
+/build/
+/build-mingw/
+/dist/
+*.log

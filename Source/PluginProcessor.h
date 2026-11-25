@@ -1,0 +1,161 @@
+#pragma once
+
+#include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_dsp/juce_dsp.h>
+
+#include <array>
+#include <atomic>
+#include <bitset>
+#include <vector>
+
+#include "Params.h"
+#include "dsp/FreqShifter.h"
+#include "dsp/ResonatorBank.h"
+#include "dsp/SpectralPitchMap.h"
+#include "dsp/OTT.h"
+
+//==============================================================================
+// The editor is written against the JUCE 8 font API. When building with JUCE 7
+// (MinGW toolchain), provide a minimal stand-in that converts to juce::Font.
+#if JUCE_MAJOR_VERSION < 8
+namespace juce
+{
+class FontOptions
+{
+public:
+    FontOptions() = default;
+    FontOptions (float h) : height (h) {}
+    FontOptions (float h, int flags) : height (h), styleFlags (flags) {}
+    FontOptions (const String& n, float h, int flags) : name (n), height (h), styleFlags (flags) {}
+    FontOptions (const String& n, const String& s, float h) : name (n), style (s), height (h) {}
+
+    FontOptions withName (const String& n) const        { auto c = *this; c.name = n; return c; }
+    FontOptions withStyle (const String& s) const       { auto c = *this; c.style = s; return c; }
+    FontOptions withHeight (float h) const              { auto c = *this; c.height = h; return c; }
+    FontOptions withPointHeight (float h) const         { auto c = *this; c.height = h; return c; }
+    FontOptions withKerningFactor (float k) const       { auto c = *this; c.kerning = k; return c; }
+    FontOptions withHorizontalScale (float s) const     { auto c = *this; c.horizontalScale = s; return c; }
+    FontOptions withUnderline (bool u = true) const     { auto c = *this; c.underline = u; return c; }
+
+    operator Font() const
+    {
+        Font f = name.isNotEmpty() ? Font (name, height, styleFlags) : Font (height, styleFlags);
+
+        if (style.isNotEmpty())
+            f.setTypefaceStyle (style);
+
+        f.setExtraKerningFactor (kerning);
+        f.setHorizontalScale (horizontalScale);
+        f.setUnderline (underline);
+        return f;
+    }
+
+private:
+    String name, style;
+    float height = 14.0f, kerning = 0.0f, horizontalScale = 1.0f;
+    int styleFlags = 0;
+    bool underline = false;
+};
+} // namespace juce
+#endif
+
+//==============================================================================
+class ColorForgeAudioProcessor : public juce::AudioProcessor
+{
+public:
+    ColorForgeAudioProcessor();
+    ~ColorForgeAudioProcessor() override = default;
+
+    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    void releaseResources() override {}
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
+    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    using juce::AudioProcessor::processBlock;
+
+    juce::AudioProcessorEditor* createEditor() override;
+    bool hasEditor() const override                         { return true; }
+
+    const juce::String getName() const override             { return "ColorForge"; }
+    bool acceptsMidi() const override                       { return true; }
+    bool producesMidi() const override                      { return false; }
+    bool isMidiEffect() const override                      { return false; }
+    double getTailLengthSeconds() const override            { return 10.0; }
+
+    int getNumPrograms() override                           { return 1; }
+    int getCurrentProgram() override                        { return 0; }
+    void setCurrentProgram (int) override                   {}
+    const juce::String getProgramName (int) override        { return {}; }
+    void changeProgramName (int, const juce::String&) override {}
+
+    void getStateInformation (juce::MemoryBlock& destData) override;
+    void setStateInformation (const void* data, int sizeInBytes) override;
+
+    //==============================================================================
+    // Editor-facing API
+    juce::AudioProcessorValueTreeState apvts;
+
+    /** 12-bit pitch-class mask currently in use (bit 0 = C ... bit 11 = B). */
+    std::atomic<int> activeNoteMask { 0 };
+
+    /** Copies the most recent mono output samples, oldest first. numSamples <= 8192. */
+    void getScopeSnapshot (float* dest, int numSamples) const noexcept;
+    double getScopeSampleRate() const noexcept              { return scopeSampleRate.load(); }
+
+private:
+    static constexpr int kChunk = 128;          // control-rate granularity
+    static constexpr int kScopeSize = 16384;    // power of two
+
+    struct StereoDelay
+    {
+        void prepare (int delaySamples);
+        void process (float* l, float* r, int num) noexcept;
+
+        std::vector<float> buf[2];
+        int size = 0, pos = 0;
+    };
+
+    struct ParamRefs
+    {
+        std::atomic<float> *root, *scale, *chord, *midiFollow, *routing, *drive, *subOn, *subFreq, *width, *mix, *outGain, *limit;
+        std::atomic<float> *pmOn, *pmAmount, *pmPurity, *pmShift, *pmSmear, *pmMix;
+        std::atomic<float> *resOn, *resMode, *resDecay, *resDamp, *resOct, *resStack, *resDetune, *resMix;
+        std::atomic<float> *fsOn, *fsShift, *fsSpread, *fsFeedback, *fsLfoRate, *fsLfoDepth, *fsMix;
+        std::atomic<float> *chOn, *chRate, *chDepth, *chMix;
+        std::atomic<float> *rvOn, *rvSize, *rvDamp, *rvMix, *rvFreeze;
+        std::atomic<float> *ottOn, *ottDepth, *ottTime, *ottUp, *ottDown, *ottLow, *ottMid, *ottHigh;
+    };
+
+    void updateParameters();
+    void processChunk (float* l, float* r, int num);
+
+    ParamRefs p {};
+    double sr = 48000.0;
+
+    // DSP
+    cf::ResonatorBank resonator;
+    cf::FreqShifter shifter;
+    cf::SpectralPitchMap pitchMap;
+    cf::OTT ott;
+    juce::dsp::Chorus<float> chorus;
+    juce::dsp::LinkwitzRileyFilter<float> crossover;
+    juce::Reverb reverb;
+    StereoDelay subDelay, dryDelay;
+
+    juce::SmoothedValue<float> driveSm, widthSm, mixSm, gainSm, subSm;
+    std::array<float, kChunk> dryBuf[2] {}, subBuf[2] {};
+
+    // Block state
+    std::bitset<128> held;
+    int routing = 0;
+    float fsShiftHz = 0.0f, fsSpreadHz = 0.0f, fsFeedback = 0.0f, fsMix = 0.0f, lfoRateHz = 0.25f, lfoDepthHz = 0.0f;
+    double lfoPhase = 0.0;
+    float lastSubFreq = -1.0f;
+    bool reverbOn = true, reverbWasOn = true, limitOn = true;
+
+    // Scope
+    std::array<float, kScopeSize> scope {};
+    std::atomic<int> scopeWrite { 0 };
+    std::atomic<double> scopeSampleRate { 48000.0 };
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ColorForgeAudioProcessor)
+};
