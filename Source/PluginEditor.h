@@ -226,7 +226,8 @@ private:
     ColorForgeAudioProcessor& processor;
     SpectrumSource& source;
     juce::Rectangle<float> plot;
-    std::vector<float> curveDb;
+    std::vector<float> curveDb, liveDb;   // liveDb: the curve with dynamic bands at their current gain
+    bool anyDynamic = false;
     int dragBand = -1, hoverBand = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EqGraph)
@@ -337,6 +338,9 @@ private:
     ColorForgeAudioProcessor& processor;
     juce::ComboBox targetBox;
     juce::TextButton resetButton { "RESET" };
+    juce::ToggleButton bypassButton { "BYPASS" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
+    float matchDb = 0.0f;
 
     float peakL = -100.0f, peakR = -100.0f, lufsM = -70.0f, lufsS = -70.0f, lufsI = -70.0f;
     float truePeak = -100.0f, corr = 0.0f, compGr = 0.0f, limGr = 0.0f;

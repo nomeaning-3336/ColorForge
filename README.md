@@ -14,13 +14,14 @@ Every module has its own bypass, and every control is a host parameter, so all o
 
 | Module | What it does |
 | --- | --- |
-| **EQ** | 8 bands: low cut and high cut (12 / 24 / 36 / 48 dB per octave), low and high shelf, four bells. Each band works on stereo, mid only or side only. Drag the numbered dots on the graph (wheel = Q, double-click = on/off) over the live spectrum. |
+| **EQ** | 8 bands: low cut and high cut (12 / 24 / 36 / 48 dB per octave), low and high shelf, four bells. Each band works on stereo, mid only or side only. The shelves and bells can be dynamic (DYN): the gain only kicks in when that band gets louder than its threshold (THR), reaching the full amount 12 dB above it, and a dotted trace shows what is applied right now. Drag the numbered dots on the graph (wheel = Q, double-click = on/off) over the live spectrum. |
 | **Compressor** | Stereo-linked bus compressor: threshold, ratio, attack, release, soft knee, makeup or auto gain, parallel mix, sidechain high-pass. Transfer curve and gain-reduction history. |
 | **Saturator** | Tape, tube and clip curves with drive, tilt tone, mix and output; the level is kept roughly constant as you drive it. |
 | **Stereo** | Mid/side width, mono bass below a chosen frequency, balance. |
 | **Limiter** | Lookahead brickwall limiter with 4x true-peak detection: gain, ceiling (dBTP), release. `Clip` mode is the soft clipper from v1. About 1.6 ms of latency. |
 | **Meters** | Sample peak, LUFS momentary / short-term / integrated (BS.1770 / EBU R128 gating), true peak, phase correlation, compressor and limiter gain reduction, and a 60-second loudness map. |
 | **Presets** | Factory starting points (mix bus glue, streaming and club masters, vocal, drums, tape, wide + mono bass, the v1 color-bass sound) from the bar at the top right, plus your own presets saved as `.cfpreset` files in `Documents/ColorForge/Presets`. Hosts see the factory presets as programs. |
+| **Level-matched bypass** | BYPASS in the STATUS column plays the dry input, delayed to line up and raised or lowered to the processed loudness, so you hear what the processing does rather than "louder". |
 | **A/B** | Two snapshots for comparing settings; the preset menu copies one into the other. Kept for the session, not saved with the project. |
 | **Chain order** | Drag EQ, COMP, SAT and STEREO around on the DYNAMICS page's signal-path map. The order is saved with the session and in presets. |
 | **Loudness quest** | Pick a target (club, loud, streaming -14, podcast, broadcast). Keep the short-term loudness within 1 LU of it for 30 seconds without overshooting the ceiling to clear the stage. |
@@ -41,7 +42,7 @@ The sub (below a cutoff you choose) can bypass the whole chain so the low end st
 | **Resonator** | Up to 24 tuned voices on the chord tones, stacked over 1–4 octaves. Modes: `Comb +`, `Comb -` (hollow, odd harmonics), `Tone` (sine-like ringing). Decay, damping, stereo detune. |
 | **Freq Shift** | Single-sideband shifter, ±2000 Hz, with stereo spread, feedback and an LFO. |
 | **Chorus / Reverb** | Widening and wash; the reverb has a freeze switch. |
-| **OTT** | 3-band upward + downward compression with depth, time and per-band gain. |
+| **OTT** | 3-band upward + downward compression with depth, time and per-band gain, movable crossovers (X LOW, X HIGH) and a solo for each band. |
 | **Notes** | Root, 15 scales, 17 chords, or **MIDI Follow**: the notes you hold define the note set. |
 
 The analyzer colours every frequency by its pitch class, so you can see which notes the sound is made of. The pitch map adds about 85 ms of latency, but only while COLOR FX and the pitch map are both on.

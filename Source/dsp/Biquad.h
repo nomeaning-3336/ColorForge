@@ -113,6 +113,14 @@ inline BiquadCoefs highPass (double f, double q, double sr) noexcept
                  1.0 + alpha, -2.0 * cw, 1.0 - alpha);
 }
 
+/** Band-pass with 0 dB peak gain (detector use). */
+inline BiquadCoefs bandPass (double f, double q, double sr) noexcept
+{
+    const double w = 2.0 * 3.14159265358979323846 * clampFreq (f, sr) / sr;
+    const double alpha = std::sin (w) / (2.0 * std::fmax (q, 0.05));
+    return make (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * std::cos (w), 1.0 - alpha);
+}
+
 inline BiquadCoefs lowPass (double f, double q, double sr) noexcept
 {
     const double w = 2.0 * 3.14159265358979323846 * clampFreq (f, sr) / sr;

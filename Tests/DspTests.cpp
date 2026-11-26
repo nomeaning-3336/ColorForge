@@ -225,6 +225,89 @@ void testMidSideEq()
     check (std::abs (rmsDb (l, 24000) - before - 6.0) < 0.1, "EQ mid band boosts a mono signal", rmsDb (l, 24000) - before, "dB (want 6)");
 }
 
+void testDynamicEq()
+{
+    // A dynamic bell stays flat while the band is quiet and reaches its full gain when it is loud.
+    auto run = [] (double amp)
+    {
+        cf::ParametricEQ eq;
+        eq.prepare (kSr, 128);
+        cf::ParametricEQ::BandParams bell;
+        bell.on = true; bell.freq = 1000.0f; bell.gainDb = 6.0f; bell.q = 1.0f;
+        bell.dynamic = true; bell.dynThresholdDb = -30.0f;
+        eq.setBand (3, bell);
+        auto l = sine (1000.0, amp, 96000), r = l;
+        const double before = rmsDb (l, 72000);
+        inChunks (l, r, [&] (float* a, float* b, int n) { eq.process (a, b, n); });
+        return std::make_pair (rmsDb (l, 72000) - before, (double) eq.getAppliedGainDb (3));
+    };
+    const auto quiet = run (0.002);   // about -57 dB, far below the threshold
+    const auto loud = run (0.5);      // about -9 dB, well above threshold + 12
+    check (std::abs (quiet.first) < 0.3, "Dynamic EQ band idle below threshold", quiet.first, "dB change (want 0)");
+    check (std::abs (loud.first - 6.0) < 0.3, "Dynamic EQ band full gain when loud", loud.first, "dB change (want 6)");
+    check (std::abs (loud.second - 6.0) < 0.3, "Dynamic EQ reports its applied gain", loud.second, "dB (want 6)");
+}
+
+void testOttBands()
+{
+    auto run = [] (double freq, int solo, float xLow, float xHigh)
+    {
+        cf::OTT ott;
+        ott.prepare (kSr);
+        ott.setParams (0.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f);   // depth 0: crossovers only
+        ott.setBands (xLow, xHigh, solo);
+        auto l = sine (freq, 0.1, 48000), r = l;
+        const double before = rmsDb (l, 24000);
+        inChunks (l, r, [&] (float* a, float* b, int n) { ott.process (a, b, n); });
+        return rmsDb (l, 24000) - before;
+    };
+    const double flat = run (1000.0, -1, 200.0f, 5000.0f);
+    check (std::abs (flat) < 0.5, "OTT bands sum flat with moved crossovers", flat, "dB change (want 0)");
+    const double lowKept = run (50.0, 0, 200.0f, 5000.0f);
+    const double highCut = run (10000.0, 0, 200.0f, 5000.0f);
+    check (std::abs (lowKept) < 1.0 && highCut < -30.0, "OTT solo low keeps lows, drops highs", highCut, "dB at 10 kHz");
+    const double midSolo = run (1000.0, 1, 200.0f, 5000.0f);
+    check (std::abs (midSolo) < 1.0, "OTT solo mid passes the mid band", midSolo, "dB at 1 kHz");
+}
+
+void testMatchedBypass()
+{
+    // With +6 dB of input gain, the level-matched bypass plays the dry input raised to the same level.
+    ColorForgeAudioProcessor proc;
+    proc.setRateAndBufferSizeDetails (kSr, 512);
+    proc.prepareToPlay (kSr, 512);
+    auto setParam = [&proc] (const char* id, float plain)
+    {
+        auto* prm = proc.apvts.getParameter (id);
+        prm->setValueNotifyingHost (prm->convertTo0to1 (plain));
+    };
+    setParam ("inGain", 6.0f);
+    setParam ("matchBypass", 1.0f);
+
+    juce::AudioBuffer<float> buf (2, 512);
+    juce::MidiBuffer midi;
+    auto in = sine (440.0, 0.05, 48000 * 4);
+    std::vector<float> out;
+    for (size_t pos = 0; pos + 512 <= in.size(); pos += 512)
+    {
+        for (int ch = 0; ch < 2; ++ch)
+            buf.copyFrom (ch, 0, in.data() + pos, 512);
+        proc.processBlock (buf, midi);
+        out.insert (out.end(), buf.getReadPointer (0), buf.getReadPointer (0) + 512);
+    }
+    const int lat = proc.getLatencySamples();
+    const size_t from = out.size() - 48000;
+    double maxErr = 0.0, peak = 0.0;
+    const double g = juce::Decibels::decibelsToGain ((double) proc.getBypassMatchDb());
+    for (size_t i = from; i < out.size(); ++i)
+    {
+        maxErr = std::max (maxErr, (double) std::abs (out[i] - g * in[i - (size_t) lat]));
+        peak = std::max (peak, (double) std::abs (out[i]));
+    }
+    check (std::abs (proc.getBypassMatchDb() - 6.0f) < 0.3f, "Bypass match gain follows the processing", proc.getBypassMatchDb(), "dB (want 6)");
+    check (maxErr < 1.0e-3, "Bypass output is the delayed dry input", maxErr, "max abs error");
+}
+
 void testPresetsAndChain()
 {
     ColorForgeAudioProcessor proc;
@@ -381,6 +464,9 @@ int main (int argc, char** argv)
     testProcessor();
     testMidSideEq();
     testPresetsAndChain();
+    testDynamicEq();
+    testOttBands();
+    testMatchedBypass();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

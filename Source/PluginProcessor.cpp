@@ -66,6 +66,35 @@ void ColorForgeAudioProcessor::StereoDelay::process (float* l, float* r, int num
 }
 
 //==============================================================================
+void ColorForgeAudioProcessor::LevelTracker::prepare (double sampleRate)
+{
+    // same K-weighting as the loudness meter (BS.1770), designed via the meter's helper filters
+    cf::LoudnessMeter tmp;
+    tmp.prepare (sampleRate);
+    for (int ch = 0; ch < 2; ++ch)
+        for (int s = 0; s < 2; ++s)
+        {
+            kw[ch][s].c = tmp.kWeightingStage (s);
+            kw[ch][s].clear();
+        }
+    coef = std::exp (-1.0 / (1.0 * sampleRate));
+    energy = 0.0;
+}
+
+void ColorForgeAudioProcessor::LevelTracker::process (const float* l, const float* r, int num) noexcept
+{
+    for (int i = 0; i < num; ++i)
+    {
+        const double a = kw[0][1].process (kw[0][0].process (l[i]));
+        const double b = kw[1][1].process (kw[1][0].process (r[i]));
+        energy = coef * energy + (1.0 - coef) * (a * a + b * b);
+    }
+    for (auto& ch : kw)
+        for (auto& f : ch)
+            f.sanitise();
+}
+
+//==============================================================================
 ColorForgeAudioProcessor::ColorForgeAudioProcessor()
     : AudioProcessor (BusesProperties().withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
@@ -115,6 +144,13 @@ ColorForgeAudioProcessor::ColorForgeAudioProcessor()
     }
     for (int b = 0; b < cf::kEqBands; ++b)
         p.eqMode[b] = ref (cf::eqId (b, "Mode").toRawUTF8());
+    for (int b = 1; b < cf::kEqBands - 1; ++b)
+    {
+        p.eqDyn[b]    = ref (cf::eqId (b, "Dyn").toRawUTF8());
+        p.eqDynThr[b] = ref (cf::eqId (b, "DynThr").toRawUTF8());
+    }
+    p.matchBypass = ref ("matchBypass");
+    p.ottXLow = ref ("ottXLow");      p.ottXHigh = ref ("ottXHigh");    p.ottSolo = ref ("ottSolo");
     p.eqLoSlope = ref (cf::eqId (0, "Slope").toRawUTF8());
     p.eqHiSlope = ref (cf::eqId (cf::kEqBands - 1, "Slope").toRawUTF8());
 
@@ -328,6 +364,9 @@ void ColorForgeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     // pitch map is in use; the limiter's lookahead is always there.
     subDelay.prepare (pitchMap.getLatencySamples());
     dryDelay.prepare (pitchMap.getLatencySamples());
+    bypassDelay.prepare (pitchMap.getLatencySamples() + limiter.getLatencySamples());
+    inLevel.prepare (sampleRate);
+    wetLevel.prepare (sampleRate);
 
     const juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) kChunk, 2 };
     chorus.prepare (spec);
@@ -344,8 +383,11 @@ void ColorForgeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     reverb.reset();
     reverbWasOn = true;
 
-    for (auto* s : { &driveSm, &widthSm, &mixSm, &gainSm, &subSm, &inGainSm, &colorSm })
+    for (auto* s : { &driveSm, &widthSm, &mixSm, &gainSm, &subSm, &inGainSm, &colorSm, &bypassSm })
         s->reset (sampleRate, 0.03);
+    bypassGainSm.reset (sampleRate, 0.3);
+    bypassSm.setCurrentAndTargetValue (isOn (p.matchBypass) ? 1.0f : 0.0f);
+    bypassGainSm.setCurrentAndTargetValue (1.0f);
 
     driveSm.setCurrentAndTargetValue (pct (p.drive));
     widthSm.setCurrentAndTargetValue (pct (p.width));
@@ -380,6 +422,7 @@ void ColorForgeAudioProcessor::updateLatency (bool force)
     if (pitchMapActive)
         pitchMap.reset();
 
+    bypassDelay.setDelay (pmLatency + limiter.getLatencySamples());
     setLatencySamples (pmLatency + limiter.getLatencySamples());
 }
 
@@ -496,6 +539,7 @@ void ColorForgeAudioProcessor::updateParameters()
 
     // ---- Dynamics
     const bool ottOn = isOn (p.ottOn);
+    ott.setBands (val (p.ottXLow), val (p.ottXHigh), (int) val (p.ottSolo) - 1);
     ott.setParams (ottOn ? pct (p.ottDepth) : 0.0f, val (p.ottTime), pct (p.ottUp), pct (p.ottDown),
                    ottOn ? val (p.ottLow) : 0.0f, ottOn ? val (p.ottMid) : 0.0f, ottOn ? val (p.ottHigh) : 0.0f);
 
@@ -528,6 +572,11 @@ void ColorForgeAudioProcessor::updateParameters()
         bp.q = val (p.eqQ[b]);
         bp.slope = b == 0 ? (int) val (p.eqLoSlope) : (b == cf::kEqBands - 1 ? (int) val (p.eqHiSlope) : 0);
         bp.mode = juce::jlimit (0, 2, (int) val (p.eqMode[b]));
+        if (p.eqDyn[b] != nullptr)
+        {
+            bp.dynamic = isOn (p.eqDyn[b]);
+            bp.dynThresholdDb = val (p.eqDynThr[b]);
+        }
         eq.setBand (b, bp);
     }
 
@@ -669,6 +718,14 @@ void ColorForgeAudioProcessor::processColorChunk (float* l, float* r, int num)
 
 void ColorForgeAudioProcessor::processChunk (float* l, float* r, int num)
 {
+    // ---- Untouched input, for the level-matched bypass
+    float* rawL = rawBuf[0].data();
+    float* rawR = rawBuf[1].data();
+    std::copy (l, l + num, rawL);
+    std::copy (r, r + num, rawR);
+    inLevel.process (rawL, rawR, num);
+    bypassDelay.process (rawL, rawR, num);
+
     // ---- Input gain
     for (int i = 0; i < num; ++i)
     {
@@ -702,6 +759,33 @@ void ColorForgeAudioProcessor::processChunk (float* l, float* r, int num)
     }
 
     limiter.process (l, r, num);
+
+    // ---- Level-matched bypass: the delayed input, scaled to the processed loudness
+    wetLevel.process (l, r, num);
+    bypassSm.setTargetValue (isOn (p.matchBypass) ? 1.0f : 0.0f);
+    {
+        const double ratio = (wetLevel.energy + 1.0e-12) / (inLevel.energy + 1.0e-12);
+        const float matchDb = (float) juce::jlimit (-18.0, 18.0, 10.0 * std::log10 (ratio));
+        const bool quiet = inLevel.energy < 1.0e-9 || wetLevel.energy < 1.0e-9;
+        if (! quiet)
+            bypassGainSm.setTargetValue (juce::Decibels::decibelsToGain (matchDb));
+        bypassMatchDb.store (juce::Decibels::gainToDecibels (bypassGainSm.getTargetValue()), std::memory_order_relaxed);
+    }
+
+    if (bypassSm.isSmoothing() || bypassSm.getTargetValue() > 0.0f)
+    {
+        for (int i = 0; i < num; ++i)
+        {
+            const float m = bypassSm.getNextValue();
+            const float g = bypassGainSm.getNextValue();
+            l[i] += m * (rawL[i] * g - l[i]);
+            r[i] += m * (rawR[i] * g - r[i]);
+        }
+    }
+    else
+    {
+        bypassGainSm.skip (num);
+    }
 
     int w = scopeWrite.load (std::memory_order_relaxed);
 
