@@ -113,6 +113,8 @@ ColorForgeAudioProcessor::ColorForgeAudioProcessor()
         p.eqGain[b]   = ref (cf::eqId (b, "Gain").toRawUTF8());
         p.eqQ[b]      = ref (cf::eqId (b, "Q").toRawUTF8());
     }
+    for (int b = 0; b < cf::kEqBands; ++b)
+        p.eqMode[b] = ref (cf::eqId (b, "Mode").toRawUTF8());
     p.eqLoSlope = ref (cf::eqId (0, "Slope").toRawUTF8());
     p.eqHiSlope = ref (cf::eqId (cf::kEqBands - 1, "Slope").toRawUTF8());
 
@@ -131,6 +133,169 @@ ColorForgeAudioProcessor::ColorForgeAudioProcessor()
     p.lmRelease = ref ("lmRelease");
 
     apvts.state.setProperty (kLufsTargetProp, 2, nullptr);   // streaming, -14 LUFS
+    apvts.state.setProperty (kPresetNameProp, "INIT", nullptr);
+    apvts.state.setProperty (kChainProp, "EQ,COMP,SAT,STEREO", nullptr);
+    apvts.state.addListener (this);
+}
+
+ColorForgeAudioProcessor::~ColorForgeAudioProcessor()
+{
+    apvts.state.removeListener (this);
+}
+
+//==============================================================================
+const char* ColorForgeAudioProcessor::chainModuleName (int module) noexcept
+{
+    static const char* names[] = { "EQ", "COMP", "SAT", "STEREO" };
+    return names[juce::jlimit (0, (int) numChainModules - 1, module)];
+}
+
+std::array<int, ColorForgeAudioProcessor::numChainModules> ColorForgeAudioProcessor::getChainOrder() const noexcept
+{
+    const int packed = chainPacked.load (std::memory_order_relaxed);
+    std::array<int, numChainModules> order {};
+    for (int i = 0; i < numChainModules; ++i)
+        order[(size_t) i] = (packed >> (2 * i)) & 3;
+    return order;
+}
+
+void ColorForgeAudioProcessor::setChainOrder (const std::array<int, numChainModules>& order)
+{
+    juce::StringArray names;
+    for (int m : order)
+        names.add (chainModuleName (m));
+    apvts.state.setProperty (kChainProp, names.joinIntoString (","), nullptr);   // the listener updates the atomic
+}
+
+void ColorForgeAudioProcessor::readChainOrderFromState()
+{
+    auto names = juce::StringArray::fromTokens (apvts.state.getProperty (kChainProp, "").toString(), ",", "");
+    std::array<int, numChainModules> order { -1, -1, -1, -1 };
+    bool used[numChainModules] {};
+    int n = 0;
+
+    for (const auto& name : names)
+        for (int m = 0; m < numChainModules; ++m)
+            if (name.trim().equalsIgnoreCase (chainModuleName (m)) && ! used[m] && n < numChainModules)
+            {
+                order[(size_t) n++] = m;
+                used[m] = true;
+            }
+
+    for (int m = 0; m < numChainModules; ++m)   // anything missing goes at the end in default order
+        if (! used[m])
+            order[(size_t) n++] = m;
+
+    int packed = 0;
+    for (int i = 0; i < numChainModules; ++i)
+        packed |= order[(size_t) i] << (2 * i);
+    chainPacked.store (packed, std::memory_order_relaxed);
+}
+
+void ColorForgeAudioProcessor::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier& prop)
+{
+    if (tree == apvts.state && prop.toString() == kChainProp)
+        readChainOrderFromState();
+}
+
+void ColorForgeAudioProcessor::valueTreeRedirected (juce::ValueTree&)
+{
+    readChainOrderFromState();
+}
+
+//==============================================================================
+void ColorForgeAudioProcessor::applyFactoryPreset (int index)
+{
+    index = juce::jlimit (0, cf::kNumFactoryPresets - 1, index);
+    const auto& preset = cf::kFactoryPresets[index];
+
+    for (auto* param : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+            ranged->setValueNotifyingHost (ranged->getDefaultValue());
+
+    for (const auto& [id, value] : preset.values)
+        if (auto* ranged = apvts.getParameter (id))
+            ranged->setValueNotifyingHost (ranged->convertTo0to1 (value));
+
+    apvts.state.setProperty (kChainProp, preset.chain, nullptr);
+    apvts.state.setProperty (kPresetNameProp, preset.name, nullptr);
+    apvts.state.setProperty ("program", index, nullptr);
+    currentProgram = index;
+}
+
+void ColorForgeAudioProcessor::setCurrentProgram (int index)
+{
+    // Hosts re-send the stored program on session load; re-applying it would wipe later tweaks.
+    if (index != currentProgram)
+        applyFactoryPreset (index);
+}
+
+const juce::String ColorForgeAudioProcessor::getProgramName (int index)
+{
+    return index >= 0 && index < cf::kNumFactoryPresets ? juce::String (cf::kFactoryPresets[index].name) : juce::String();
+}
+
+juce::String ColorForgeAudioProcessor::getPresetName() const
+{
+    return apvts.state.getProperty (kPresetNameProp, "INIT").toString();
+}
+
+bool ColorForgeAudioProcessor::savePreset (const juce::File& file)
+{
+    auto state = apvts.copyState();
+    state.setProperty (kPresetNameProp, file.getFileNameWithoutExtension().toUpperCase(), nullptr);
+    state.removeProperty ("uiPage", nullptr);
+
+    auto xml = state.createXml();
+    if (xml == nullptr || ! file.getParentDirectory().createDirectory())
+        return false;
+
+    if (! xml->writeTo (file))
+        return false;
+
+    apvts.state.setProperty (kPresetNameProp, file.getFileNameWithoutExtension().toUpperCase(), nullptr);
+    return true;
+}
+
+bool ColorForgeAudioProcessor::loadPreset (const juce::File& file)
+{
+    auto xml = juce::XmlDocument::parse (file);
+    if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
+        return false;
+
+    auto tree = juce::ValueTree::fromXml (*xml);
+    tree.setProperty (kPresetNameProp, file.getFileNameWithoutExtension().toUpperCase(), nullptr);
+    restoreState (tree, true);
+    return true;
+}
+
+void ColorForgeAudioProcessor::restoreState (juce::ValueTree tree, bool keepUiState)
+{
+    if (keepUiState)
+        for (const char* prop : { "uiPage", kLufsTargetProp })
+            if (apvts.state.hasProperty (prop))
+                tree.setProperty (prop, apvts.state.getProperty (prop), nullptr);
+
+    apvts.replaceState (tree);
+}
+
+//==============================================================================
+void ColorForgeAudioProcessor::switchToSlot (int slot)
+{
+    slot = juce::jlimit (0, 1, slot);
+    if (slot == abActive)
+        return;
+
+    abSlots[abActive] = apvts.copyState();
+    abActive = slot;
+
+    if (abSlots[slot].isValid())   // an empty slot starts as a copy of the other one
+        restoreState (abSlots[slot].createCopy(), true);
+}
+
+void ColorForgeAudioProcessor::copyActiveToOtherSlot()
+{
+    abSlots[1 - abActive] = apvts.copyState();
 }
 
 bool ColorForgeAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -362,6 +527,7 @@ void ColorForgeAudioProcessor::updateParameters()
         bp.gainDb = val (p.eqGain[b]);
         bp.q = val (p.eqQ[b]);
         bp.slope = b == 0 ? (int) val (p.eqLoSlope) : (b == cf::kEqBands - 1 ? (int) val (p.eqHiSlope) : 0);
+        bp.mode = juce::jlimit (0, 2, (int) val (p.eqMode[b]));
         eq.setBand (b, bp);
     }
 
@@ -516,10 +682,17 @@ void ColorForgeAudioProcessor::processChunk (float* l, float* r, int num)
         processColorChunk (l, r, num);
 
     // ---- Mix & master chain
-    eq.process (l, r, num);
-    comp.process (l, r, num);
-    sat.process (l, r, num);
-    imager.process (l, r, num);
+    const int packed = chainPacked.load (std::memory_order_relaxed);
+    for (int i = 0; i < numChainModules; ++i)
+    {
+        switch ((packed >> (2 * i)) & 3)
+        {
+            case modEq:   eq.process (l, r, num);     break;
+            case modComp: comp.process (l, r, num);   break;
+            case modSat:  sat.process (l, r, num);    break;
+            default:      imager.process (l, r, num); break;
+        }
+    }
 
     for (int i = 0; i < num; ++i)
     {
@@ -602,7 +775,10 @@ void ColorForgeAudioProcessor::setStateInformation (const void* data, int sizeIn
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
         if (xml->hasTagName (apvts.state.getType()))
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        {
+            restoreState (juce::ValueTree::fromXml (*xml), false);
+            currentProgram = juce::jlimit (0, cf::kNumFactoryPresets - 1, (int) apvts.state.getProperty ("program", 0));
+        }
 }
 
 juce::AudioProcessorEditor* ColorForgeAudioProcessor::createEditor()

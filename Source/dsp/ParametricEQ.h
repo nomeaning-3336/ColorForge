@@ -36,6 +36,7 @@ public:
         bool on = false;
         float freq = 1000.0f, gainDb = 0.0f, q = 0.707f;
         int slope = 0;   // cut bands: 0..3 -> 12..48 dB/oct
+        int mode = 0;    // 0 = stereo (L and R), 1 = mid only, 2 = side only
     };
 
     struct Design
@@ -136,12 +137,27 @@ public:
                 if (b.mix <= 0.0)
                     continue;
 
-                for (int ch = 0; ch < 2; ++ch)
+                if (b.mode == 0)
                 {
-                    double v = y[ch];
+                    for (int ch = 0; ch < 2; ++ch)
+                    {
+                        double v = y[ch];
+                        for (int s = 0; s < b.d.numSections; ++s)
+                            v = b.filt[(size_t) ch][(size_t) s].process (v);
+                        y[ch] += b.mix * (v - y[ch]);
+                    }
+                }
+                else
+                {
+                    // filter only the mid or the side component
+                    double ms[2] = { 0.5 * (y[0] + y[1]), 0.5 * (y[0] - y[1]) };
+                    double& c = ms[b.mode == 1 ? 0 : 1];
+                    double v = c;
                     for (int s = 0; s < b.d.numSections; ++s)
-                        v = b.filt[(size_t) ch][(size_t) s].process (v);
-                    y[ch] += b.mix * (v - y[ch]);
+                        v = b.filt[0][(size_t) s].process (v);
+                    c += b.mix * (v - c);
+                    y[0] = ms[0] + ms[1];
+                    y[1] = ms[0] - ms[1];
                 }
             }
 
@@ -160,7 +176,7 @@ private:
     {
         BandParams target;
         double freq = 1000.0, gain = 0.0, q = 0.707, mix = 0.0;
-        int slope = 0;
+        int slope = 0, mode = 0;
         bool snap = true;
         Design d;
         double lastF = -1.0, lastG = 1.0e9, lastQ = -1.0;
@@ -190,9 +206,10 @@ private:
                 b.mix = tm;
         }
 
-        if (b.slope != t.slope)
+        if (b.slope != t.slope || b.mode != t.mode)
         {
             b.slope = t.slope;
+            b.mode = t.mode;
             for (auto& ch : b.filt)
                 for (auto& f : ch)
                     f.clear();

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "Params.h"
+#include "Presets.h"
 #include "dsp/FreqShifter.h"
 #include "dsp/ResonatorBank.h"
 #include "dsp/SpectralPitchMap.h"
@@ -66,11 +67,12 @@ private:
 #endif
 
 //==============================================================================
-class ColorForgeAudioProcessor : public juce::AudioProcessor
+class ColorForgeAudioProcessor : public juce::AudioProcessor,
+                                 private juce::ValueTree::Listener
 {
 public:
     ColorForgeAudioProcessor();
-    ~ColorForgeAudioProcessor() override = default;
+    ~ColorForgeAudioProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -87,10 +89,10 @@ public:
     bool isMidiEffect() const override                      { return false; }
     double getTailLengthSeconds() const override            { return 10.0; }
 
-    int getNumPrograms() override                           { return 1; }
-    int getCurrentProgram() override                        { return 0; }
-    void setCurrentProgram (int) override                   {}
-    const juce::String getProgramName (int) override        { return {}; }
+    int getNumPrograms() override                           { return cf::kNumFactoryPresets; }
+    int getCurrentProgram() override                        { return currentProgram; }
+    void setCurrentProgram (int index) override;
+    const juce::String getProgramName (int index) override;
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -114,6 +116,26 @@ public:
 
     /** Non-automatable UI state stored with the plugin state. */
     static constexpr const char* kLufsTargetProp = "lufsTarget";
+    static constexpr const char* kPresetNameProp = "presetName";
+    static constexpr const char* kChainProp      = "chainOrder";
+
+    //==============================================================================
+    // Presets (message thread)
+    void applyFactoryPreset (int index);
+    bool savePreset (const juce::File&);
+    bool loadPreset (const juce::File&);
+    juce::String getPresetName() const;
+
+    // A/B snapshots (message thread; kept for the session, not saved with the project)
+    void switchToSlot (int slot);
+    void copyActiveToOtherSlot();
+    int getActiveSlot() const noexcept                      { return abActive; }
+
+    // Mix chain order: EQ, COMP, SAT and STEREO in any order (message thread)
+    enum ChainModule { modEq = 0, modComp, modSat, modStereo, numChainModules };
+    std::array<int, numChainModules> getChainOrder() const noexcept;
+    void setChainOrder (const std::array<int, numChainModules>&);
+    static const char* chainModuleName (int module) noexcept;
 
 private:
     static constexpr int kChunk = 128;          // control-rate granularity
@@ -143,7 +165,7 @@ private:
         std::atomic<float> *inGain, *colorOn;
         std::atomic<float> *eqOn;
         std::atomic<float> *eqBandOn[cf::kEqBands], *eqFreq[cf::kEqBands], *eqGain[cf::kEqBands], *eqQ[cf::kEqBands];
-        std::atomic<float> *eqLoSlope, *eqHiSlope;
+        std::atomic<float> *eqLoSlope, *eqHiSlope, *eqMode[cf::kEqBands];
         std::atomic<float> *cpOn, *cpThresh, *cpRatio, *cpAttack, *cpRelease, *cpKnee, *cpMakeup, *cpAuto, *cpMix, *cpScHpf;
         std::atomic<float> *satOn, *satMode, *satDrive, *satTone, *satMix, *satOut;
         std::atomic<float> *imgOn, *imgWidth, *imgMonoOn, *imgMonoFreq, *imgBalance;
@@ -152,6 +174,11 @@ private:
 
     void updateParameters();
     void updateLatency (bool force);
+    void restoreState (juce::ValueTree, bool keepUiState);
+    void readChainOrderFromState();
+
+    void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
+    void valueTreeRedirected (juce::ValueTree&) override;
     void processChunk (float* l, float* r, int num);
     void processColorChunk (float* l, float* r, int num);
 
@@ -185,6 +212,11 @@ private:
     float lastSubFreq = -1.0f;
     bool reverbOn = true, reverbWasOn = true;
     bool colorOn = false, pitchMapActive = false;   // pitch map latency only while it is in use
+
+    std::atomic<int> chainPacked { 0 | (1 << 2) | (2 << 4) | (3 << 6) };   // 2 bits per slot
+    int currentProgram = 0;
+    juce::ValueTree abSlots[2];
+    int abActive = 0;
 
     // Scope
     std::array<float, kScopeSize> scope {};

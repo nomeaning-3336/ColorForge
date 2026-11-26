@@ -188,6 +188,122 @@ void testProcessor()
     check (proc.getLatencySamples() == base, "Latency with the pitch map off", proc.getLatencySamples(), "samples");
 }
 
+void testMidSideEq()
+{
+    // A side-only boost must leave a mono (mid-only) signal untouched, and vice versa.
+    for (int mode = 1; mode <= 2; ++mode)
+    {
+        cf::ParametricEQ eq;
+        eq.prepare (kSr, 128);
+        cf::ParametricEQ::BandParams bell;
+        bell.on = true; bell.freq = 1000.0f; bell.gainDb = 9.0f; bell.q = 1.0f; bell.mode = mode;
+        eq.setBand (3, bell);
+
+        auto l = sine (1000.0, 0.1, 48000);
+        auto r = l;
+        if (mode == 1)
+            for (auto& v : r) v = -v;          // pure side signal: a mid band must not touch it
+        const auto refL = l;
+        inChunks (l, r, [&] (float* a, float* b, int n) { eq.process (a, b, n); });
+
+        double maxErr = 0.0;
+        for (size_t i = 0; i < l.size(); ++i)
+            maxErr = std::max (maxErr, (double) std::abs (l[i] - refL[i]));
+        check (maxErr < 1.0e-5, mode == 1 ? "EQ mid band leaves a pure side signal alone" : "EQ side band leaves a mono signal alone",
+               maxErr, "max abs error");
+    }
+
+    // ...and a mid boost on a mono signal does boost it.
+    cf::ParametricEQ eq;
+    eq.prepare (kSr, 128);
+    cf::ParametricEQ::BandParams bell;
+    bell.on = true; bell.freq = 1000.0f; bell.gainDb = 6.0f; bell.q = 1.0f; bell.mode = 1;
+    eq.setBand (3, bell);
+    auto l = sine (1000.0, 0.1, 48000), r = l;
+    const double before = rmsDb (l, 24000);
+    inChunks (l, r, [&] (float* a, float* b, int n) { eq.process (a, b, n); });
+    check (std::abs (rmsDb (l, 24000) - before - 6.0) < 0.1, "EQ mid band boosts a mono signal", rmsDb (l, 24000) - before, "dB (want 6)");
+}
+
+void testPresetsAndChain()
+{
+    ColorForgeAudioProcessor proc;
+    proc.setRateAndBufferSizeDetails (kSr, 512);
+    proc.prepareToPlay (kSr, 512);
+    auto raw = [&proc] (const char* id) { return proc.apvts.getRawParameterValue (id)->load(); };
+
+    proc.applyFactoryPreset (5);   // DRUM PUNCH
+    check (raw ("cpOn") > 0.5f && std::abs (raw ("cpRatio") - 4.0f) < 0.01f, "Factory preset sets its values",
+           raw ("cpRatio"), "comp ratio (want 4)");
+    check (proc.getPresetName() == "DRUM PUNCH", "Factory preset name is shown", proc.getCurrentProgram(), "program index");
+
+    proc.applyFactoryPreset (0);
+    check (raw ("cpOn") < 0.5f && std::abs (raw ("cpRatio") - 2.0f) < 0.01f, "INIT puts every value back to default",
+           raw ("cpRatio"), "comp ratio (want 2)");
+
+    // save -> change -> load round trip
+    auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("cf_test_preset.cfpreset");
+    proc.apvts.getParameter ("satDrive")->setValueNotifyingHost (proc.apvts.getParameter ("satDrive")->convertTo0to1 (17.0f));
+    proc.savePreset (file);
+    proc.applyFactoryPreset (0);
+    proc.loadPreset (file);
+    check (std::abs (raw ("satDrive") - 17.0f) < 0.05f, "User preset save + load round trip", raw ("satDrive"), "sat drive (want 17)");
+    file.deleteFile();
+
+    // A/B: B starts as a copy, then holds its own settings
+    proc.applyFactoryPreset (0);
+    proc.switchToSlot (1);
+    proc.apvts.getParameter ("cpOn")->setValueNotifyingHost (1.0f);
+    proc.switchToSlot (0);
+    const bool aOff = raw ("cpOn") < 0.5f;
+    proc.switchToSlot (1);
+    check (aOff && raw ("cpOn") > 0.5f, "A/B snapshots keep separate settings", raw ("cpOn"), "comp on in B");
+    proc.switchToSlot (0);
+
+    // chain order: saturating before vs after a big EQ boost sounds different
+    auto render = [&proc] ()
+    {
+        juce::AudioBuffer<float> buf (2, 512);
+        juce::MidiBuffer midi;
+        double energy = 0.0;
+        for (int blk = 0; blk < 40; ++blk)
+        {
+            for (int i = 0; i < 512; ++i)
+            {
+                const float v = (float) (0.3 * std::sin (2.0 * kPi * 100.0 * (blk * 512 + i) / kSr));
+                buf.setSample (0, i, v);
+                buf.setSample (1, i, v);
+            }
+            proc.processBlock (buf, midi);
+            if (blk >= 20)
+                for (int i = 0; i < 512; ++i)
+                    energy += (double) buf.getSample (0, i) * buf.getSample (0, i);
+        }
+        return 10.0 * std::log10 (energy + 1.0e-30);
+    };
+    auto set = [&proc] (const char* id, float v) { proc.apvts.getParameter (id)->setValueNotifyingHost (proc.apvts.getParameter (id)->convertTo0to1 (v)); };
+    proc.applyFactoryPreset (0);
+    set ("satOn", 1.0f); set ("satMode", 2.0f); set ("satDrive", 12.0f);
+    set ("eq2Gain", 18.0f); set ("eq2Freq", 100.0f); set ("limit", 0.0f);
+
+    proc.setChainOrder ({ ColorForgeAudioProcessor::modEq, ColorForgeAudioProcessor::modComp,
+                          ColorForgeAudioProcessor::modSat, ColorForgeAudioProcessor::modStereo });
+    const double eqFirst = render();
+    proc.setChainOrder ({ ColorForgeAudioProcessor::modSat, ColorForgeAudioProcessor::modComp,
+                          ColorForgeAudioProcessor::modEq, ColorForgeAudioProcessor::modStereo });
+    const double satFirst = render();
+    check (std::abs (eqFirst - satFirst) > 3.0, "Chain order changes the sound (EQ>SAT vs SAT>EQ)", satFirst - eqFirst, "dB difference");
+    check (proc.getChainOrder()[0] == ColorForgeAudioProcessor::modSat, "Chain order is read back", proc.getChainOrder()[0], "first module");
+
+    // the order survives a save / restore of the plugin state
+    juce::MemoryBlock state;
+    proc.getStateInformation (state);
+    ColorForgeAudioProcessor other;
+    other.setStateInformation (state.getData(), (int) state.getSize());
+    check (other.getChainOrder()[0] == ColorForgeAudioProcessor::modSat, "Chain order is saved with the session",
+           other.getChainOrder()[0], "first module after reload");
+}
+
 /** Renders each editor page to a PNG after feeding the processor some audio. */
 int snapshot (const juce::File& dir)
 {
@@ -263,6 +379,8 @@ int main (int argc, char** argv)
     testCompressor();
     testSaturator();
     testProcessor();
+    testMidSideEq();
+    testPresetsAndChain();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
     return failures == 0 ? 0 : 1;
