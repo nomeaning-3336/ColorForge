@@ -59,9 +59,10 @@ Grab the files from the [latest release](../../releases/latest):
 
 - Drop an audio file anywhere on the window (WAV, AIFF, FLAC, OGG, MP3). It starts looping through the plugin.
 - `Space` plays / stops. Click or drag on the waveform to seek.
-- **Export WAV** renders the loaded file with the current settings to a 24-bit WAV.
+- **Export WAV** renders the loaded file with the current settings, and its automation lanes, to a 24-bit WAV.
+- **Automation lanes:** arm **REC**, press play and move any control. Each control you touch is written to its own lane while you hold it (touch mode), across as many loops as you like, and plays back while **READ** is on. Pick a lane under the waveform to see it; drag on it to draw, double-click to clear. **Lanes...** saves them next to the audio file as `<name>.cfauto` (loaded again automatically with the file) or anywhere else.
 - Turn on **MIDI Follow** and play the on-screen keyboard (or a MIDI keyboard enabled under *Audio Settings*) to set the chord by hand.
-- Headless render with default settings: `ColorForge-Player-win64.exe --render input.wav output.wav`
+- Headless render with default settings: `ColorForge-Player-win64.exe --render input.wav output.wav [lanes.cfauto]`
 
 ## Building
 

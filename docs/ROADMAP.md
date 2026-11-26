@@ -50,10 +50,10 @@ Each phase ships as its own pull request and keeps the MinGW build working.
 - Done: level-matched bypass.
 - Done: movable crossovers and band solo on the OTT.
 
-### Phase 3: modulation & automation in the standalone program
+### Phase 3: modulation & automation in the standalone program (done, PRs #4 and #6)
 - Done: two LFOs and an envelope follower with tempo sync, routed through an 8-slot matrix to 38 targets.
 - Done: four macro knobs.
-- Automation lanes in the standalone player: record knob moves while the file loops, play them back, and render them in Export and `--render`.
+- Done: automation lanes in the standalone player: touch-record knob moves while the file loops, play them back, draw on them, and render them in Export and `--render`.
 
 ### Phase 4: more processors
 - Transient shaper, gate / expander, de-esser.

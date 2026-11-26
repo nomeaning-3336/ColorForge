@@ -6,6 +6,7 @@
 
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "OfflineRender.h"
 
 namespace
 {
@@ -118,6 +119,10 @@ public:
             const int n = juce::jmin ((int) kMaxSlice, numSamples - pos);
             juce::AudioBuffer<float> view (work.getArrayOfWritePointers(), 2, n);
 
+            // automation lanes play in file time, once per slice (about 5 ms)
+            if (readLanes.load (std::memory_order_relaxed) && transport.isPlaying())
+                automation.apply (processor.apvts, transport.getCurrentPosition());
+
             transport.getNextAudioBlock (juce::AudioSourceChannelInfo (&view, 0, n));
 
             const float target = inputGain.load (std::memory_order_relaxed);
@@ -168,10 +173,12 @@ public:
     juce::AudioTransportSource transport;
     juce::MidiKeyboardState keyboardState;
     std::atomic<float> inputGain { 1.0f };
+    std::atomic<bool> readLanes { true };
+    cf::Automation automation;
     juce::String deviceError;
 
 private:
-    static constexpr int kMaxSlice = 2048;
+    static constexpr int kMaxSlice = 256;
 
     juce::TimeSliceThread readAhead { "ColorForge read-ahead" };
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
@@ -182,71 +189,6 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PlayerEngine)
 };
-
-//==============================================================================
-/** Renders a file offline through a fresh ColorForge instance into a 24-bit stereo WAV.
-    Pass the plugin state to reuse the settings of a live instance; nullptr = defaults. */
-juce::Result renderFile (juce::AudioFormatManager& formats, const juce::File& input, const juce::File& output,
-                         const juce::MemoryBlock* state)
-{
-    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (input));
-
-    if (reader == nullptr || reader->lengthInSamples <= 0)
-        return juce::Result::fail ("Can't read " + input.getFileName());
-
-    constexpr int block = 512;
-    const double rate = reader->sampleRate;
-
-    ColorForgeAudioProcessor processor;
-
-    if (state != nullptr && state->getSize() > 0)
-        processor.setStateInformation (state->getData(), (int) state->getSize());
-
-    processor.setNonRealtime (true);
-    processor.setRateAndBufferSizeDetails (rate, block);
-    processor.prepareToPlay (rate, block);
-
-    output.deleteFile();
-    std::unique_ptr<juce::FileOutputStream> stream (output.createOutputStream());
-
-    if (stream == nullptr)
-        return juce::Result::fail ("Can't write " + output.getFileName());
-
-    juce::WavAudioFormat wav;
-    std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), rate, 2, 24, {}, 0));
-
-    if (writer == nullptr)
-        return juce::Result::fail ("Can't create a WAV writer for " + output.getFileName());
-
-    stream.release();   // the writer owns the stream now
-
-    const juce::int64 latency = processor.getLatencySamples();
-    const juce::int64 length = reader->lengthInSamples;
-    const juce::int64 total = length + latency + (juce::int64) (rate * 4.0);   // 4 s tail for reverb and resonators
-
-    juce::AudioBuffer<float> buffer (2, block);
-    juce::MidiBuffer midi;
-
-    for (juce::int64 pos = 0; pos < total; pos += block)
-    {
-        buffer.clear();
-
-        if (pos < length)
-            reader->read (&buffer, 0, (int) juce::jmin ((juce::int64) block, length - pos), pos, true, true);
-
-        midi.clear();
-        processor.processBlock (buffer, midi);
-
-        // Drop the plugin latency so the export lines up with the source file.
-        const int skip = (int) juce::jlimit ((juce::int64) 0, (juce::int64) block, latency - pos);
-
-        if (skip < block && ! writer->writeFromAudioSampleBuffer (buffer, skip, block - skip))
-            return juce::Result::fail ("Write error on " + output.getFileName());
-    }
-
-    writer.reset();
-    return juce::Result::ok();
-}
 
 //==============================================================================
 /** Waveform overview with playhead. Click or drag to seek. */
@@ -344,6 +286,273 @@ private:
 };
 
 //==============================================================================
+/** Touch-records knob moves into the automation lanes while the file plays: a lane is
+    written from the moment a control is grabbed until it is let go, then playback of that
+    lane resumes. Gestures come from the editor's attachments on the message thread. */
+class AutomationRecorder final : private juce::AudioProcessorParameter::Listener
+{
+public:
+    explicit AutomationRecorder (PlayerEngine& e) : engine (e)
+    {
+        for (auto* prm : engine.processor.getParameters())
+            prm->addListener (this);
+        touches.resize ((size_t) engine.processor.getParameters().size());
+    }
+
+    ~AutomationRecorder() override
+    {
+        for (auto* prm : engine.processor.getParameters())
+            prm->removeListener (this);
+    }
+
+    bool armed = false;
+    std::function<void (const juce::String&)> onLaneTouched;
+
+    /** Called from the UI timer: extends every held control's lane up to now. */
+    void tick()
+    {
+        for (size_t i = 0; i < touches.size(); ++i)
+            if (touches[i].active)
+                writeNow ((int) i);
+    }
+
+private:
+    struct Touch { bool active = false; double lastT = 0.0; };
+
+    juce::RangedAudioParameter* paramAt (int index) const
+    {
+        return dynamic_cast<juce::RangedAudioParameter*> (engine.processor.getParameters()[index]);
+    }
+
+    double now() const      { return engine.transport.getCurrentPosition(); }
+
+    void writeNow (int index)
+    {
+        auto* prm = paramAt (index);
+        auto& t = touches[(size_t) index];
+        const double n = now();
+        engine.automation.write (prm->getParameterID(), t.lastT, n, prm->getValue());
+        t.lastT = n;
+    }
+
+    void parameterValueChanged (int, float) override {}   // also fires from lane playback; ignored
+
+    void parameterGestureChanged (int index, bool starting) override
+    {
+        if (! juce::MessageManager::existsAndIsCurrentThread() || index < 0 || index >= (int) touches.size())
+            return;
+        auto* prm = paramAt (index);
+        if (prm == nullptr)
+            return;
+        auto& t = touches[(size_t) index];
+        const auto id = prm->getParameterID();
+
+        if (starting)
+        {
+            if (! armed || ! engine.transport.isPlaying())
+                return;
+            t.active = true;
+            t.lastT = now();
+            engine.automation.setTouching (id, true);
+            engine.automation.beginTouch (id, t.lastT, prm->getValue(), prm->isDiscrete() || prm->isBoolean());
+            writeNow (index);
+            if (onLaneTouched)
+                onLaneTouched (id);
+        }
+        else if (t.active)
+        {
+            writeNow (index);
+            t.active = false;
+            engine.automation.setTouching (id, false);
+        }
+    }
+
+    PlayerEngine& engine;
+    std::vector<Touch> touches;
+};
+
+//==============================================================================
+/** One automation lane over the file's timeline. Pick the lane on the left; drag on the
+    curve to draw, double-click to clear the lane. */
+class LaneView final : public juce::Component,
+                       private juce::Timer
+{
+public:
+    explicit LaneView (PlayerEngine& e) : engine (e)
+    {
+        laneBox.setTextWhenNothingSelected ("NO LANES YET");
+        laneBox.setTooltip ("Automation lane to show and edit");
+        laneBox.onChange = [this] { shownId = idForItem (laneBox.getSelectedId()); repaint(); };
+        laneBox.getProperties().set ("pxScale", 1.5f);
+        addAndMakeVisible (laneBox);
+        startTimerHz (30);
+    }
+
+    void show (const juce::String& id)
+    {
+        shownId = id;
+        refreshList();
+    }
+
+    void refreshList()
+    {
+        const auto ids = engine.automation.laneIds();
+        if (ids == listed && laneBox.getSelectedId() == itemFor (shownId))
+            return;
+        listed = ids;
+        laneBox.clear (juce::dontSendNotification);
+        for (int i = 0; i < ids.size(); ++i)
+            if (auto* prm = engine.processor.apvts.getParameter (ids[i]))
+                laneBox.addItem (prm->getName (40).toUpperCase(), i + 1);
+        if (! ids.contains (shownId))
+            shownId = ids.isEmpty() ? juce::String() : ids[0];
+        laneBox.setSelectedId (itemFor (shownId), juce::dontSendNotification);
+        repaint();
+    }
+
+    juce::String getShownId() const     { return shownId; }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (4, 4);
+        auto left = r.removeFromLeft (220);
+        laneBox.setBounds (left.removeFromTop (24));
+        plot = r.withTrimmedLeft (8);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        using namespace cfui::px;
+        drawTextIn (g, "AUTOMATION", getLocalBounds().toFloat().reduced (6.0f, 0.0f).withTrimmedTop (34.0f).withHeight (12.0f),
+                    juce::Justification::centredLeft, 1.5f, pal::dim);
+        drawTextIn (g, "DRAG = DRAW  \x04  DOUBLE-CLICK = CLEAR", getLocalBounds().toFloat().reduced (6.0f, 0.0f).withTrimmedTop (50.0f).withHeight (10.0f),
+                    juce::Justification::centredLeft, 1.0f, pal::dim);
+
+        auto area = plot.toFloat();
+        bevel (g, area, 2.0f, pal::bgAlt, true);
+        const double len = engine.transport.getLengthInSeconds();
+        auto* prm = engine.processor.apvts.getParameter (shownId);
+
+        if (len <= 0.0 || prm == nullptr)
+        {
+            drawTextIn (g, len <= 0.0 ? "LOAD A FILE, ARM REC, PRESS PLAY AND MOVE A KNOB"
+                                      : "ARM REC AND MOVE A KNOB WHILE THE FILE PLAYS",
+                        area, juce::Justification::centred, 1.5f, pal::dim);
+            return;
+        }
+
+        auto inner = area.reduced (4.0f, 6.0f);
+        const auto pts = engine.automation.copyLane (shownId);
+        const bool discrete = engine.automation.isDiscrete (shownId);
+        juce::RectangleList<float> line;
+        const int cols = (int) (inner.getWidth() / 2.0f);
+        float prevY = -1.0f;
+        for (int c = 0; c < cols; ++c)
+        {
+            const double t = len * (double) c / (double) juce::jmax (1, cols - 1);
+            const float v = engine.automation.valueAt (shownId, t);
+            const float y = std::floor (juce::jmap (v, 0.0f, 1.0f, inner.getBottom() - 2.0f, inner.getY()) / 2.0f) * 2.0f;
+            const float a = prevY < 0.0f ? y : juce::jmin (prevY, y), b = prevY < 0.0f ? y : juce::jmax (prevY, y);
+            line.addWithoutMerging ({ inner.getX() + (float) c * 2.0f, a, 2.0f, b - a + 2.0f });
+            prevY = y;
+        }
+        g.setColour (pal::yellow.withAlpha (0.9f));
+        g.fillRectList (line);
+
+        if (pts.size() < 400)
+            for (const auto& p : pts)
+            {
+                const float x = inner.getX() + (float) (p.t / len) * inner.getWidth();
+                const float y = juce::jmap (p.v, 0.0f, 1.0f, inner.getBottom(), inner.getY());
+                g.setColour (pal::text);
+                g.fillRect (std::round (x) - 1.0f, std::round (y) - 1.0f, 3.0f, 3.0f);
+            }
+
+        const float px = inner.getX() + (float) (engine.transport.getCurrentPosition() / len) * inner.getWidth();
+        g.setColour (juce::Colours::white);
+        g.fillRect (px - 0.75f, area.getY() + 2.0f, 1.5f, area.getHeight() - 4.0f);
+
+        juce::String txt = prm->getName (40).toUpperCase() + "  " + prm->getCurrentValueAsText().toUpperCase();
+        if (discrete)
+            txt << "  (STEPS)";
+        drawTextIn (g, txt, area.reduced (8.0f, 4.0f).withHeight (12.0f), juce::Justification::topLeft, 1.0f, pal::text);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (! plot.contains (e.getPosition()) || engine.processor.apvts.getParameter (shownId) == nullptr)
+            return;
+        drawing = true;
+        lastT = timeAt (e.position.x);
+        engine.automation.setTouching (shownId, true);
+        engine.automation.beginTouch (shownId, lastT, valueAt (e.position.y), engine.automation.isDiscrete (shownId));
+        engine.automation.write (shownId, lastT, lastT, valueAt (e.position.y));
+        repaint();
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (! drawing)
+            return;
+        const double t = timeAt (e.position.x);
+        const float v = valueAt (e.position.y);
+        if (t >= lastT)
+            engine.automation.write (shownId, lastT, t, v);
+        else
+            engine.automation.write (shownId, t - 1.0e-6, lastT, v);   // drawing right to left
+        lastT = t;
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (drawing)
+            engine.automation.setTouching (shownId, false);
+        drawing = false;
+    }
+
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        if (plot.contains (e.getPosition()) && shownId.isNotEmpty())
+        {
+            engine.automation.clear (shownId);
+            refreshList();
+        }
+    }
+
+private:
+    double timeAt (float x) const
+    {
+        const auto inner = plot.toFloat().reduced (4.0f, 6.0f);
+        return juce::jlimit (0.0, engine.transport.getLengthInSeconds(),
+                             (double) ((x - inner.getX()) / inner.getWidth()) * engine.transport.getLengthInSeconds());
+    }
+
+    float valueAt (float y) const
+    {
+        const auto inner = plot.toFloat().reduced (4.0f, 6.0f);
+        return juce::jlimit (0.0f, 1.0f, juce::jmap (y, inner.getBottom(), inner.getY(), 0.0f, 1.0f));
+    }
+
+    int itemFor (const juce::String& id) const    { const int i = listed.indexOf (id); return i < 0 ? 0 : i + 1; }
+    juce::String idForItem (int item) const       { return item > 0 && item <= listed.size() ? listed[item - 1] : juce::String(); }
+
+    void timerCallback() override
+    {
+        refreshList();
+        repaint();
+    }
+
+    PlayerEngine& engine;
+    juce::ComboBox laneBox;
+    juce::StringArray listed;
+    juce::String shownId;
+    juce::Rectangle<int> plot;
+    bool drawing = false;
+    double lastT = 0.0;
+};
+
+//==============================================================================
 class PlayerComponent final : public juce::Component,
                               public juce::FileDragAndDropTarget,
                               private juce::Timer
@@ -376,6 +585,24 @@ public:
         addAndMakeVisible (audioButton);
         audioButton.onClick = [this] { showAudioSettings(); };
 
+        addAndMakeVisible (recButton);
+        recButton.setColour (juce::ToggleButton::tickColourId, cfui::px::pal::red);
+        recButton.setTooltip ("Arm automation recording: while the file plays, every knob you move is written to its lane");
+        recButton.onClick = [this] { recorder.armed = recButton.getToggleState(); };
+
+        addAndMakeVisible (readButton);
+        readButton.setToggleState (true, juce::dontSendNotification);
+        readButton.setColour (juce::ToggleButton::tickColourId, cfui::px::pal::green);
+        readButton.setTooltip ("Play the automation lanes back (Export WAV always includes them)");
+        readButton.onClick = [this] { engine.readLanes.store (readButton.getToggleState()); };
+
+        addAndMakeVisible (lanesButton);
+        lanesButton.setTooltip ("Save, load or clear the automation lanes");
+        lanesButton.onClick = [this] { showLanesMenu(); };
+
+        addAndMakeVisible (lanes);
+        recorder.onLaneTouched = [this] (const juce::String& id) { lanes.show (id); };
+
         addAndMakeVisible (gainLabel);
         gainLabel.setText ("Input", juce::dontSendNotification);
         gainLabel.setColour (juce::Label::textColourId, kText);
@@ -405,12 +632,13 @@ public:
         for (juce::Component* c : { (juce::Component*) &openButton, (juce::Component*) &playButton,
                                     (juce::Component*) &loopButton, (juce::Component*) &exportButton,
                                     (juce::Component*) &audioButton, (juce::Component*) &gainLabel,
-                                    (juce::Component*) &statusLabel })
+                                    (juce::Component*) &statusLabel, (juce::Component*) &recButton,
+                                    (juce::Component*) &readButton, (juce::Component*) &lanesButton })
             c->getProperties().set ("pxScale", 1.5f);
 
         setWantsKeyboardFocus (true);
-        setSize (editor->getWidth(), kTopBar + kWave + editor->getHeight() + kKeys);
-        startTimerHz (10);
+        setSize (editor->getWidth(), kTopBar + kWave + kLane + editor->getHeight() + kKeys);
+        startTimerHz (30);
     }
 
     ~PlayerComponent() override
@@ -438,6 +666,12 @@ public:
 
         currentFile = file;
         exportButton.setEnabled (true);
+
+        // lanes saved next to the file come back with it
+        const auto laneFile = laneFileFor (file);
+        if (laneFile.existsAsFile() && engine.automation.load (laneFile))
+            lanes.refreshList();
+
         waveform.setFile (file);
         statusLabel.setText (file.getFileName(), juce::dontSendNotification);
         return true;
@@ -461,13 +695,20 @@ public:
         loopButton.setBounds (top.removeFromLeft (80));
         top.removeFromLeft (6);
         exportButton.setBounds (top.removeFromLeft (124));
+        top.removeFromLeft (14);
+        recButton.setBounds (top.removeFromLeft (64));
+        top.removeFromLeft (4);
+        readButton.setBounds (top.removeFromLeft (72));
+        top.removeFromLeft (4);
+        lanesButton.setBounds (top.removeFromLeft (84));
         audioButton.setBounds (top.removeFromRight (176));
         top.removeFromRight (10);
-        gainSlider.setBounds (top.removeFromRight (250));
-        gainLabel.setBounds (top.removeFromRight (64));
+        gainSlider.setBounds (top.removeFromRight (200));
+        gainLabel.setBounds (top.removeFromRight (56));
         statusLabel.setBounds (top.reduced (6, 0));
 
         waveform.setBounds (area.removeFromTop (kWave).reduced (8, 2));
+        lanes.setBounds (area.removeFromTop (kLane).reduced (4, 0));
         keyboard.setBounds (area.removeFromBottom (kKeys));
         keyboard.setKeyWidth ((float) getWidth() / 36.0f);   // 36 white keys in C2..C7
 
@@ -501,7 +742,7 @@ public:
     }
 
 private:
-    static constexpr int kTopBar = 40, kWave = 64, kKeys = 60;
+    static constexpr int kTopBar = 40, kWave = 64, kLane = 76, kKeys = 60;
 
     void openFile()
     {
@@ -543,15 +784,79 @@ private:
 
                                   juce::MemoryBlock state;
                                   engine.processor.getStateInformation (state);
+                                  cf::Automation laneCopy;
+                                  laneCopy.copyFrom (engine.automation);
 
                                   juce::MouseCursor::showWaitCursor();
-                                  const auto result = renderFile (engine.formatManager, currentFile, target, &state);
+                                  const auto result = cf::renderFile (engine.formatManager, currentFile, target, &state,
+                                                                      laneCopy.isEmpty() ? nullptr : &laneCopy);
                                   juce::MouseCursor::hideWaitCursor();
 
                                   statusLabel.setText (result.wasOk() ? "Exported " + target.getFileName()
                                                                       : result.getErrorMessage(),
                                                        juce::dontSendNotification);
                               });
+    }
+
+    static juce::File laneFileFor (const juce::File& audio)
+    {
+        return audio.withFileExtension (cf::Automation::kFileExtension);
+    }
+
+    void showLanesMenu()
+    {
+        juce::PopupMenu m;
+        const bool any = ! engine.automation.isEmpty();
+        m.addItem (1, "Save lanes" + (currentFile.existsAsFile() ? " next to " + currentFile.getFileName() : juce::String()),
+                   any && currentFile.existsAsFile());
+        m.addItem (2, "Save lanes as...", any);
+        m.addItem (3, "Load lanes...");
+        m.addSeparator();
+        m.addItem (4, "Clear the shown lane", lanes.getShownId().isNotEmpty());
+        m.addItem (5, "Clear all lanes", any);
+
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&lanesButton), [this] (int r)
+        {
+            if (r == 1)
+                setStatus (engine.automation.save (laneFileFor (currentFile)) ? "Lanes saved" : "Couldn't save the lanes");
+            else if (r == 2 || r == 3)
+            {
+                const bool saving = r == 2;
+                chooser = std::make_unique<juce::FileChooser> (saving ? "Save automation lanes" : "Load automation lanes",
+                                                               currentFile.existsAsFile() ? laneFileFor (currentFile) : juce::File(),
+                                                               juce::String ("*") + cf::Automation::kFileExtension);
+                const int flags = saving ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting)
+                                         : juce::FileBrowserComponent::openMode;
+                chooser->launchAsync (flags | juce::FileBrowserComponent::canSelectFiles, [this, saving] (const juce::FileChooser& fc)
+                {
+                    auto f = fc.getResult();
+                    if (f == juce::File())
+                        return;
+                    if (saving)
+                        setStatus (engine.automation.save (f.withFileExtension (cf::Automation::kFileExtension)) ? "Lanes saved" : "Couldn't save the lanes");
+                    else
+                    {
+                        setStatus (engine.automation.load (f) ? "Lanes loaded" : "Not a lanes file");
+                        lanes.refreshList();
+                    }
+                });
+            }
+            else if (r == 4)
+            {
+                engine.automation.clear (lanes.getShownId());
+                lanes.refreshList();
+            }
+            else if (r == 5)
+            {
+                engine.automation.clearAll();
+                lanes.refreshList();
+            }
+        });
+    }
+
+    void setStatus (const juce::String& text)
+    {
+        statusLabel.setText (text, juce::dontSendNotification);
     }
 
     void showAudioSettings()
@@ -573,16 +878,20 @@ private:
     void timerCallback() override
     {
         playButton.setButtonText (engine.transport.isPlaying() ? "Stop" : "Play");
+        recorder.tick();
         playButton.setEnabled (engine.hasFile());
     }
 
     PlayerEngine engine;
     WaveformView waveform { engine };
+    LaneView lanes { engine };
+    AutomationRecorder recorder { engine };
     cfui::PixelLookAndFeel lnf;
     juce::MidiKeyboardComponent keyboard { engine.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard };
     juce::TextButton openButton { "Open..." }, playButton { "Play" }, exportButton { "Export WAV" },
                      audioButton { "Audio Settings" };
-    juce::ToggleButton loopButton { "Loop" };
+    juce::ToggleButton loopButton { "Loop" }, recButton { "REC" }, readButton { "READ" };
+    juce::TextButton lanesButton { "Lanes..." };
     juce::Slider gainSlider;
     juce::Label gainLabel, statusLabel;
     juce::File currentFile;
@@ -648,7 +957,7 @@ public:
 
     void initialise (const juce::String& commandLine) override
     {
-        // Headless mode:  "ColorForge Player.exe" --render <input> <output.wav>
+        // Headless mode:  "ColorForge Player.exe" --render <input> <output.wav> [lanes.cfauto]
         const auto args = getCommandLineParameterArray();
 
         if (args.size() >= 3 && args[0] == "--render")
@@ -657,7 +966,18 @@ public:
             formats.registerBasicFormats();
 
             const auto cwd = juce::File::getCurrentWorkingDirectory();
-            const auto result = renderFile (formats, cwd.getChildFile (args[1]), cwd.getChildFile (args[2]), nullptr);
+            cf::Automation lanes;
+            if (args.size() >= 4 && ! lanes.load (cwd.getChildFile (args[3])))
+            {
+                std::fprintf (stderr, "Can't read the lanes file %s\n", args[3].toRawUTF8());
+                setApplicationReturnValue (1);
+                quit();
+                return;
+            }
+            const auto result = cf::renderFile (formats, cwd.getChildFile (args[1]), cwd.getChildFile (args[2]), nullptr,
+                                                lanes.isEmpty() ? nullptr : &lanes);
+            if (result.failed())
+                std::fprintf (stderr, "%s\n", result.getErrorMessage().toRawUTF8());
 
             setApplicationReturnValue (result.wasOk() ? 0 : 1);
             quit();

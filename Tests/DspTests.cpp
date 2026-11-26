@@ -2,7 +2,9 @@
 // it prints one line per check and exits non-zero if any check fails.
 
 #include "PluginProcessor.h"
+#include "OfflineRender.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <random>
 #include <vector>
@@ -384,6 +386,71 @@ void testModulation()
     check (missing == 0, "Every mod target is a real parameter", missing, "missing");
 }
 
+void testAutomation()
+{
+    cf::Automation a;
+    a.write ("inGain", 0.0, 0.0, 0.2f);
+    a.write ("inGain", 0.0, 2.0, 0.6f);
+    check (std::abs (a.valueAt ("inGain", 1.0) - 0.4f) < 1.0e-5f, "Lane interpolates between points", a.valueAt ("inGain", 1.0), "(want 0.4)");
+
+    a.beginTouch ("cpOn", 0.0, 0.0f, true);
+    a.write ("cpOn", 0.0, 1.0, 1.0f);
+    check (a.valueAt ("cpOn", 0.9) == 0.0f && a.valueAt ("cpOn", 1.0) == 1.0f, "Switch lanes step instead of ramping",
+           a.valueAt ("cpOn", 0.9), "(want 0 just before the step)");
+
+    // touch-write replaces what was there, and a loop wrap replaces both ends
+    cf::Automation b;
+    for (int i = 0; i <= 10; ++i)
+        b.write ("satDrive", i * 1.0 - 1.0e-6, i * 1.0, 0.1f);
+    b.write ("satDrive", 3.0, 6.0, 0.9f);
+    const auto pts = b.copyLane ("satDrive");
+    const bool replaced = std::none_of (pts.begin(), pts.end(), [] (const cf::Automation::Point& p) { return p.t > 3.0 && p.t < 6.0; });
+    b.write ("satDrive", 9.0, 1.0, 0.7f);   // wrapped from 9 s round to 1 s
+    const auto wrapped = b.copyLane ("satDrive");
+    const bool wrapOk = std::none_of (wrapped.begin(), wrapped.end(), [] (const cf::Automation::Point& p) { return p.t > 9.0 || p.t < 1.0; });
+    check (replaced && wrapOk, "Touch-write replaces the range (also across the loop)", (double) wrapped.size(), "points left");
+
+    // save + load round trip
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("cf-test.cfauto");
+    a.save (file);
+    cf::Automation c;
+    const bool loaded = c.load (file);
+    file.deleteFile();
+    check (loaded && std::abs (c.valueAt ("inGain", 1.0) - 0.4f) < 1.0e-4f && c.isDiscrete ("cpOn"),
+           "Lanes save and load", c.valueAt ("inGain", 1.0), "(want 0.4)");
+
+    // an offline render follows a lane: input gain steps up 6 dB after 1 s
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("cf-render-test");
+    dir.createDirectory();
+    const auto in = dir.getChildFile ("in.wav"), out = dir.getChildFile ("out.wav");
+    {
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (in), kSr, 2, 24, {}, 0));
+        auto sig = sine (440.0, 0.05, 96000);
+        const float* chans[] = { sig.data(), sig.data() };
+        w->writeFromFloatArrays (chans, 2, (int) sig.size());
+    }
+    cf::Automation lanes;
+    lanes.write ("inGain", 0.0, 0.0, 0.5f);           // 0 dB (range -24..+24)
+    lanes.write ("inGain", 0.0, 0.999, 0.5f);
+    lanes.write ("inGain", 0.999, 1.0, 0.625f);       // +6 dB
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    const auto result = cf::renderFile (fm, in, out, nullptr, &lanes);
+    double first = 0.0, second = 0.0;
+    if (std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (out) })
+    {
+        juce::AudioBuffer<float> buf (2, (int) r->lengthInSamples);
+        r->read (&buf, 0, buf.getNumSamples(), 0, true, true);
+        const float* d = buf.getReadPointer (0);
+        std::vector<float> a1 (d + 12000, d + 43000), a2 (d + 60000, d + 91000);
+        first = rmsDb (a1, 0);
+        second = rmsDb (a2, 0);
+    }
+    dir.deleteRecursively();
+    check (result.wasOk() && std::abs (second - first - 6.0) < 0.3, "Export follows the automation lanes", second - first, "dB step (want 6)");
+}
+
 void testPresetsAndChain()
 {
     ColorForgeAudioProcessor proc;
@@ -549,6 +616,7 @@ int main (int argc, char** argv)
     testOttBands();
     testMatchedBypass();
     testModulation();
+    testAutomation();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
     return failures == 0 ? 0 : 1;
