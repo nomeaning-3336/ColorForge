@@ -82,6 +82,79 @@ inline constexpr LoudnessTarget kLoudnessTargets[] =
 inline constexpr int kNumLoudnessTargets = (int) (sizeof (kLoudnessTargets) / sizeof (kLoudnessTargets[0]));
 
 //==============================================================================
+// Modulation (version 5): two LFOs, an envelope follower and four macros, routed by an
+// 8-slot matrix to the targets below. Targets are only ever appended, because sessions
+// store the target index.
+inline constexpr int kNumModSlots = 8;
+inline constexpr int kNumMacros = 4;
+
+struct ModTarget { const char* id; const char* name; };
+inline constexpr ModTarget kModTargets[] =
+{
+    { "",           "---" },
+    { "inGain",     "INPUT GAIN" },
+    { "eq1Freq",    "EQ LO CUT FREQ" },
+    { "eq2Gain",    "EQ LO SHELF GAIN" },
+    { "eq3Freq",    "EQ BELL 1 FREQ" },
+    { "eq3Gain",    "EQ BELL 1 GAIN" },
+    { "eq4Freq",    "EQ BELL 2 FREQ" },
+    { "eq4Gain",    "EQ BELL 2 GAIN" },
+    { "eq5Freq",    "EQ BELL 3 FREQ" },
+    { "eq5Gain",    "EQ BELL 3 GAIN" },
+    { "eq6Freq",    "EQ BELL 4 FREQ" },
+    { "eq6Gain",    "EQ BELL 4 GAIN" },
+    { "eq7Gain",    "EQ HI SHELF GAIN" },
+    { "eq8Freq",    "EQ HI CUT FREQ" },
+    { "cpThresh",   "COMP THRESHOLD" },
+    { "cpRatio",    "COMP RATIO" },
+    { "cpMakeup",   "COMP MAKEUP" },
+    { "cpMix",      "COMP MIX" },
+    { "satDrive",   "SAT DRIVE" },
+    { "satTone",    "SAT TONE" },
+    { "satMix",     "SAT MIX" },
+    { "imgWidth",   "STEREO WIDTH" },
+    { "imgBalance", "BALANCE" },
+    { "lmGain",     "LIMITER GAIN" },
+    { "outGain",    "OUTPUT" },
+    { "drive",      "COLOR DRIVE" },
+    { "width",      "COLOR WIDTH" },
+    { "mix",        "COLOR MIX" },
+    { "pmAmount",   "MAP AMOUNT" },
+    { "pmShift",    "MAP SHIFT" },
+    { "resDecay",   "RES DECAY" },
+    { "resMix",     "RES MIX" },
+    { "fsShift",    "SHIFT HZ" },
+    { "fsMix",      "SHIFT MIX" },
+    { "chDepth",    "CHORUS DEPTH" },
+    { "chMix",      "CHORUS MIX" },
+    { "rvSize",     "REVERB SIZE" },
+    { "rvMix",      "REVERB MIX" },
+    { "ottDepth",   "OTT DEPTH" },
+};
+inline constexpr int kNumModTargets = (int) (sizeof (kModTargets) / sizeof (kModTargets[0]));
+
+/** Tempo-sync divisions for the LFOs, in quarter notes per cycle. */
+struct SyncDivision { const char* name; double beats; };
+inline constexpr SyncDivision kSyncDivisions[] =
+{
+    { "4 BARS", 16.0 }, { "2 BARS", 8.0 }, { "1 BAR", 4.0 }, { "1/2", 2.0 }, { "1/4", 1.0 },
+    { "1/8", 0.5 }, { "1/16", 0.25 }, { "1/4 T", 2.0 / 3.0 }, { "1/8 T", 1.0 / 3.0 }, { "1/8 D", 0.75 },
+};
+inline constexpr int kNumSyncDivisions = (int) (sizeof (kSyncDivisions) / sizeof (kSyncDivisions[0]));
+
+inline const juce::StringArray& modSourceNames()
+{
+    static const juce::StringArray n { "OFF", "LFO 1", "LFO 2", "ENV", "MACRO 1", "MACRO 2", "MACRO 3", "MACRO 4" };
+    return n;
+}
+
+/** "mod<slot+1><suffix>", e.g. modId (0, "Src") == "mod1Src". */
+inline juce::String modId (int slot, const char* suffix)
+{
+    return "mod" + juce::String (slot + 1) + suffix;
+}
+
+//==============================================================================
 // Parameter IDs (all version 1):
 //   Global    : root scale chord midiFollow routing drive subOn subFreq width mix outGain limit
 //   Pitch map : pmOn pmAmount pmPurity pmShift pmSmear pmMix
@@ -102,6 +175,9 @@ inline constexpr int kNumLoudnessTargets = (int) (sizeof (kLoudnessTargets) / si
 // Version 4:
 //   EQ        : eq2..eq7 Dyn / DynThr (dynamic bells and shelves)
 //   Global    : matchBypass        OTT: ottXLow ottXHigh ottSolo
+// Version 5:
+//   LFOs      : lfo1/lfo2 Shape Rate Sync Div    Envelope: envAttack envRelease envGain
+//   Macros    : macro1..macro4                   Matrix: mod1..mod8 Src Dst Amt
 inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
     using namespace juce;
@@ -298,6 +374,40 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     addFloat  ("ottXLow", "OTT Low/Mid Split", skewed (40.0f, 500.0f, 1.0f, 120.0f), 88.0f, "Hz");
     addFloat  ("ottXHigh", "OTT Mid/High Split", skewed (1000.0f, 10000.0f, 1.0f, 2500.0f), 2500.0f, "Hz");
     addChoice ("ottSolo", "OTT Solo", { "Solo Off", "Solo Low", "Solo Mid", "Solo High" }, 0);
+
+    // =========================================================================
+    // Version 5: modulation
+    ver = 5;
+    {
+        StringArray divNames, targetNames;
+        for (const auto& d : kSyncDivisions) divNames.add (d.name);
+        for (const auto& t : kModTargets) targetNames.add (t.name);
+
+        for (int i = 1; i <= 2; ++i)
+        {
+            const String id ("lfo" + String (i)), nm ("LFO " + String (i));
+            addChoice ((id + "Shape").toRawUTF8(), (nm + " Shape").toRawUTF8(),
+                       { "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "Random" }, 0);
+            addFloat  ((id + "Rate").toRawUTF8(), (nm + " Rate").toRawUTF8(), skewed (0.01f, 20.0f, 0.001f, 1.0f), i == 1 ? 0.5f : 2.0f, "Hz");
+            addBool   ((id + "Sync").toRawUTF8(), (nm + " Tempo Sync").toRawUTF8(), false);
+            addChoice ((id + "Div").toRawUTF8(), (nm + " Division").toRawUTF8(), divNames, i == 1 ? 2 : 4);
+        }
+        addFloat ("envAttack", "Env Attack", skewed (0.5f, 500.0f, 0.1f, 20.0f), 10.0f, "ms");
+        addFloat ("envRelease", "Env Release", skewed (10.0f, 3000.0f, 1.0f, 300.0f), 250.0f, "ms");
+        addFloat ("envGain", "Env Sensitivity", NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, "dB");
+
+        for (int m = 1; m <= kNumMacros; ++m)
+            addPct (("macro" + String (m)).toRawUTF8(), ("Macro " + String (m)).toRawUTF8(), 0.0f);
+
+        for (int s = 0; s < kNumModSlots; ++s)
+        {
+            const String nm ("Mod " + String (s + 1));
+            addChoice (modId (s, "Src").toRawUTF8(), (nm + " Source").toRawUTF8(), modSourceNames(), 0);
+            addChoice (modId (s, "Dst").toRawUTF8(), (nm + " Target").toRawUTF8(), targetNames, 0);
+            addFloat  (modId (s, "Amt").toRawUTF8(), (nm + " Amount").toRawUTF8(),
+                       NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%");
+        }
+    }
 
     return layout;
 }

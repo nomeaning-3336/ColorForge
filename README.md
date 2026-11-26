@@ -4,13 +4,13 @@ A mixing & mastering suite for Windows with an 8-bit look: a **VST3 plugin** and
 
 ![ColorForge EQ page](docs/screenshot.png)
 
-More pages: [MASTER](docs/screenshot-master.png) · [DYNAMICS](docs/screenshot-dynamics.png) · [COLOR](docs/screenshot-color.png)
+More pages: [MOD](docs/screenshot-mod.png) · [MASTER](docs/screenshot-master.png) · [DYNAMICS](docs/screenshot-dynamics.png) · [COLOR](docs/screenshot-color.png)
 
 ## Signal chain
 
 `Input → Color FX → [EQ · Compressor · Saturator · Stereo, in any order] → Output → Limiter → Meters`
 
-Every module has its own bypass, and every control is a host parameter, so all of it can be automated in a DAW. The editor has four pages (COLOR, EQ, DYNAMICS, MASTER) and an always-visible STATUS column.
+Every module has its own bypass, and every control is a host parameter, so all of it can be automated in a DAW. The editor has five pages (COLOR, EQ, DYNAMICS, MASTER, MOD) and an always-visible STATUS column.
 
 | Module | What it does |
 | --- | --- |
@@ -24,6 +24,7 @@ Every module has its own bypass, and every control is a host parameter, so all o
 | **Level-matched bypass** | BYPASS in the STATUS column plays the dry input, delayed to line up and raised or lowered to the processed loudness, so you hear what the processing does rather than "louder". |
 | **A/B** | Two snapshots for comparing settings; the preset menu copies one into the other. Kept for the session, not saved with the project. |
 | **Chain order** | Drag EQ, COMP, SAT and STEREO around on the DYNAMICS page's signal-path map. The order is saved with the session and in presets. |
+| **Modulation** | MOD page: two LFOs (sine, triangle, saws, square, random; free in Hz or synced to the host tempo from 4 bars to 1/16), an envelope follower on the input, and four macro knobs. An 8-slot matrix routes any of them to 38 targets (EQ gains and frequencies, compressor, saturator, width, limiter gain, levels and the color FX). Knobs show a white pip where modulation is taking them; the knob itself (and its automation) stays where you set it. |
 | **Loudness quest** | Pick a target (club, loud, streaming -14, podcast, broadcast). Keep the short-term loudness within 1 LU of it for 30 seconds without overshooting the ceiling to clear the stage. |
 
 ### Color FX (the original ColorForge chain)

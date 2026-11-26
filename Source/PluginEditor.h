@@ -54,11 +54,13 @@ public:
 };
 
 //==============================================================================
-class Knob : public juce::Component
+class Knob : public juce::Component,
+             private juce::Timer
 {
 public:
     Knob (juce::AudioProcessorValueTreeState&, juce::RangedAudioParameter&,
           const juce::String& paramID, const juce::String& shortName, juce::Colour hue);
+    ~Knob() override;
 
     void resized() override;
 
@@ -66,7 +68,12 @@ public:
     juce::Label  caption;
 
 private:
+    void timerCallback() override;   // only runs for knobs that can be modulated
+
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
+    const ColorForgeAudioProcessor* processor = nullptr;
+    int modTarget = 0;
+    float shownMod = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Knob)
 };
@@ -352,7 +359,68 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StatusPanel)
 };
+//==============================================================================
+/** LFO waveform with a moving dot at the current phase. */
+class LfoScope : public juce::Component
+{
+public:
+    LfoScope (ColorForgeAudioProcessor&, int lfoIndex, juce::Colour);
+
+    void update()   { repaint(); }
+    void paint (juce::Graphics&) override;
+
+private:
+    ColorForgeAudioProcessor& processor;
+    int index;
+    juce::Colour colour;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LfoScope)
+};
+
+/** Envelope follower level as a scrolling trace. */
+class EnvScope : public juce::Component
+{
+public:
+    explicit EnvScope (ColorForgeAudioProcessor&);
+
+    void update();
+    void paint (juce::Graphics&) override;
+
+private:
+    ColorForgeAudioProcessor& processor;
+    std::array<float, 120> history {};
+    int writePos = 0;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EnvScope)
+};
+
+/** The 8-slot modulation matrix: source, target, amount and a live meter per slot. */
+class ModMatrix : public juce::Component
+{
+public:
+    explicit ModMatrix (ColorForgeAudioProcessor&);
+
+    void update();
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+private:
+    struct Row
+    {
+        std::unique_ptr<ChoiceControl> src, dst;
+        juce::Slider amount;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
+        juce::Rectangle<int> meter, label;
+    };
+
+    ColorForgeAudioProcessor& processor;
+    std::array<Row, cf::kNumModSlots> rows;
+    std::array<float, cf::kNumModSlots> live {};
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ModMatrix)
+};
 } // namespace cfui
+
 
 //==============================================================================
 class ColorForgeAudioProcessorEditor : public juce::AudioProcessorEditor,
@@ -366,7 +434,7 @@ public:
     void resized() override;
 
 private:
-    enum Page { pageColor = 0, pageEq, pageDynamics, pageMaster, numPages };
+    enum Page { pageColor = 0, pageEq, pageDynamics, pageMaster, pageMod, numPages };
 
     void timerCallback() override;
     void showPage (int page);
@@ -402,6 +470,12 @@ private:
     // MASTER
     std::unique_ptr<cfui::FxPanel> inputPanel, stereoPanel, limiterPanel, outputPanel;
     std::unique_ptr<cfui::LoudnessHistory> loudnessHistory;
+
+    // MOD
+    std::unique_ptr<cfui::FxPanel> lfoPanels[2], envPanel, macroPanel;
+    std::unique_ptr<cfui::LfoScope> lfoScopes[2];
+    std::unique_ptr<cfui::EnvScope> envScope;
+    std::unique_ptr<cfui::ModMatrix> modMatrix;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ColorForgeAudioProcessorEditor)
 };

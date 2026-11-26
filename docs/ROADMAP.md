@@ -51,8 +51,8 @@ Each phase ships as its own pull request and keeps the MinGW build working.
 - Done: movable crossovers and band solo on the OTT.
 
 ### Phase 3: modulation & automation in the standalone program
-- Two LFOs and an envelope follower, each assignable to any parameter, with tempo sync in the plugin.
-- Four macro knobs.
+- Done: two LFOs and an envelope follower with tempo sync, routed through an 8-slot matrix to 38 targets.
+- Done: four macro knobs.
 - Automation lanes in the standalone player: record knob moves while the file loops, play them back, and render them in Export and `--render`.
 
 ### Phase 4: more processors

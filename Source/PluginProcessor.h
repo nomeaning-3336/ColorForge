@@ -20,6 +20,7 @@
 #include "dsp/StereoImager.h"
 #include "dsp/Limiter.h"
 #include "dsp/LoudnessMeter.h"
+#include "dsp/ModEngine.h"
 
 //==============================================================================
 // The editor is written against the JUCE 8 font API. When building with JUCE 7
@@ -117,6 +118,26 @@ public:
     /** Gain applied to the dry signal while the level-matched bypass is on (dB). */
     float getBypassMatchDb() const noexcept                 { return bypassMatchDb.load (std::memory_order_relaxed); }
 
+    /** Modulation: current source values (index as cf::modSourceNames()) and the offset each
+        target gets, in normalised parameter units, for the editor. */
+    float getModSourceValue (int source) const noexcept
+    {
+        return source >= 0 && source < cf::ModEngine::kNumSources ? mod.display[(size_t) source].load (std::memory_order_relaxed) : 0.0f;
+    }
+    float getModOffset (int target) const noexcept
+    {
+        return target > 0 && target < cf::kNumModTargets ? modOffsetUi[(size_t) target].load (std::memory_order_relaxed) : 0.0f;
+    }
+    /** Target index for a parameter ID, or 0 when it can't be modulated. */
+    static int modTargetIndex (const juce::String& paramID) noexcept
+    {
+        for (int t = 1; t < cf::kNumModTargets; ++t)
+            if (paramID == cf::kModTargets[t].id)
+                return t;
+        return 0;
+    }
+    double getLfoPhase (int i) const noexcept              { return mod.getPhase (i); }
+
     /** Non-automatable UI state stored with the plugin state. */
     static constexpr const char* kLufsTargetProp = "lufsTarget";
     static constexpr const char* kPresetNameProp = "presetName";
@@ -175,7 +196,17 @@ private:
         std::atomic<float> *satOn, *satMode, *satDrive, *satTone, *satMix, *satOut;
         std::atomic<float> *imgOn, *imgWidth, *imgMonoOn, *imgMonoFreq, *imgBalance;
         std::atomic<float> *lmMode, *lmGain, *lmCeiling, *lmRelease;
+
+        // v5: modulation
+        std::atomic<float> *lfoShape[2], *lfoRate[2], *lfoSync[2], *lfoDiv[2];
+        std::atomic<float> *envAttack, *envRelease, *envGain, *macro[cf::kNumMacros];
+        std::atomic<float> *modSrc[cf::kNumModSlots], *modDst[cf::kNumModSlots], *modAmt[cf::kNumModSlots];
     };
+
+    /** Reads a parameter, plus its modulation offset when it is a modulation target. */
+    float modVal (const std::atomic<float>* v) const noexcept;
+    /** Advances the mod sources by one chunk and works out the offset for every target. */
+    void updateModulation (const float* l, const float* r, int num, double ppq) noexcept;
 
     void updateParameters();
     void updateLatency (bool force);
@@ -218,6 +249,15 @@ private:
     cf::Saturator sat;
     cf::StereoImager imager;
     cf::Limiter limiter;
+
+    cf::ModEngine mod;
+    std::array<std::atomic<float>*, cf::kNumModTargets> modRaw {};
+    std::array<juce::RangedAudioParameter*, cf::kNumModTargets> modParam {};
+    std::array<float, cf::kNumModTargets> modOffset {};
+    std::array<std::atomic<float>, cf::kNumModTargets> modOffsetUi {};
+    bool modActive = false;
+    double hostBpm = 120.0;
+    bool hostPlaying = false;
 
     juce::SmoothedValue<float> driveSm, widthSm, mixSm, gainSm, subSm, inGainSm, colorSm;
     std::array<float, kChunk> dryBuf[2] {}, subBuf[2] {};

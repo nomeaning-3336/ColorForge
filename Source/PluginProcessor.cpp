@@ -151,6 +151,30 @@ ColorForgeAudioProcessor::ColorForgeAudioProcessor()
     }
     p.matchBypass = ref ("matchBypass");
     p.ottXLow = ref ("ottXLow");      p.ottXHigh = ref ("ottXHigh");    p.ottSolo = ref ("ottSolo");
+
+    for (int i = 0; i < 2; ++i)
+    {
+        const juce::String id ("lfo" + juce::String (i + 1));
+        p.lfoShape[i] = ref ((id + "Shape").toRawUTF8());
+        p.lfoRate[i]  = ref ((id + "Rate").toRawUTF8());
+        p.lfoSync[i]  = ref ((id + "Sync").toRawUTF8());
+        p.lfoDiv[i]   = ref ((id + "Div").toRawUTF8());
+    }
+    p.envAttack = ref ("envAttack");  p.envRelease = ref ("envRelease");  p.envGain = ref ("envGain");
+    for (int m = 0; m < cf::kNumMacros; ++m)
+        p.macro[m] = ref (("macro" + juce::String (m + 1)).toRawUTF8());
+    for (int s = 0; s < cf::kNumModSlots; ++s)
+    {
+        p.modSrc[s] = ref (cf::modId (s, "Src").toRawUTF8());
+        p.modDst[s] = ref (cf::modId (s, "Dst").toRawUTF8());
+        p.modAmt[s] = ref (cf::modId (s, "Amt").toRawUTF8());
+    }
+    for (int t = 1; t < cf::kNumModTargets; ++t)
+    {
+        modRaw[(size_t) t] = ref (cf::kModTargets[t].id);
+        modParam[(size_t) t] = apvts.getParameter (cf::kModTargets[t].id);
+        jassert (modParam[(size_t) t] != nullptr);
+    }
     p.eqLoSlope = ref (cf::eqId (0, "Slope").toRawUTF8());
     p.eqHiSlope = ref (cf::eqId (cf::kEqBands - 1, "Slope").toRawUTF8());
 
@@ -359,6 +383,9 @@ void ColorForgeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     imager.prepare (sampleRate);
     limiter.prepare (sampleRate);
     meter.prepare (sampleRate);
+    mod.prepare (sampleRate);
+    modOffset.fill (0.0f);
+    modActive = false;
 
     // The dry and kept-sub paths are delayed to match the pitch map, but only while the
     // pitch map is in use; the limiter's lookahead is always there.
@@ -427,8 +454,65 @@ void ColorForgeAudioProcessor::updateLatency (bool force)
 }
 
 //==============================================================================
+float ColorForgeAudioProcessor::modVal (const std::atomic<float>* v) const noexcept
+{
+    const float raw = v->load (std::memory_order_relaxed);
+    if (! modActive)
+        return raw;
+
+    for (size_t t = 1; t < modRaw.size(); ++t)
+        if (modRaw[t] == v)
+        {
+            if (modOffset[t] == 0.0f || modParam[t] == nullptr)
+                return raw;
+            const float n = modParam[t]->convertTo0to1 (raw) + modOffset[t];
+            return modParam[t]->convertFrom0to1 (juce::jlimit (0.0f, 1.0f, n));
+        }
+    return raw;
+}
+
+void ColorForgeAudioProcessor::updateModulation (const float* l, const float* r, int num, double ppq) noexcept
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        cf::ModEngine::Lfo lp;
+        lp.shape = juce::jlimit (0, 5, (int) val (p.lfoShape[i]));
+        lp.rateHz = val (p.lfoRate[i]);
+        lp.sync = isOn (p.lfoSync[i]);
+        lp.beats = cf::kSyncDivisions[juce::jlimit (0, cf::kNumSyncDivisions - 1, (int) val (p.lfoDiv[i]))].beats;
+        mod.setLfo (i, lp);
+    }
+    mod.setEnvelope (val (p.envAttack), val (p.envRelease), val (p.envGain));
+    for (int m = 0; m < cf::kNumMacros; ++m)
+        mod.setMacro (m, pct (p.macro[m]));
+
+    mod.process (l, r, num, hostBpm, hostPlaying, ppq);
+
+    std::array<float, cf::kNumModTargets> next {};
+    bool any = false;
+    for (int s = 0; s < cf::kNumModSlots; ++s)
+    {
+        const int src = (int) val (p.modSrc[s]);
+        const int dst = (int) val (p.modDst[s]);
+        const float amt = pct (p.modAmt[s]);
+        if (src <= 0 || dst <= 0 || dst >= cf::kNumModTargets || amt == 0.0f)
+            continue;
+        next[(size_t) dst] += amt * mod.value (src);
+        any = true;
+    }
+
+    modOffset = next;
+    modActive = any;
+    for (size_t t = 0; t < next.size(); ++t)
+        modOffsetUi[t].store (next[t], std::memory_order_relaxed);
+}
+
 void ColorForgeAudioProcessor::updateParameters()
 {
+    // modulated reads: these shadow the plain helpers for the rest of this function
+    const auto val = [this] (const std::atomic<float>* v) noexcept { return modVal (v); };
+    const auto pct = [this] (const std::atomic<float>* v) noexcept { return modVal (v) * 0.01f; };
+
     // ---- Note set: held MIDI notes if following, otherwise root + scale / chord.
     const int root     = juce::jlimit (0, 11, (int) val (p.root));
     const int scaleIdx = juce::jlimit (0, cf::kNumScales - 1, (int) val (p.scale));
@@ -828,14 +912,41 @@ void ColorForgeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     if (buffer.getNumChannels() < 2 || numSamples == 0)
         return;
 
-    updateParameters();
-    updateLatency (false);
+    // host tempo and position for the tempo-synced LFOs
+    double ppq = 0.0;
+    hostPlaying = false;
+    if (auto* ph = getPlayHead())
+        if (const auto pos = ph->getPosition())
+        {
+            if (const auto bpm = pos->getBpm())
+                hostBpm = *bpm;
+            if (const auto q = pos->getPpqPosition())
+            {
+                ppq = *q;
+                hostPlaying = pos->getIsPlaying();
+            }
+        }
 
     float* l = buffer.getWritePointer (0);
     float* r = buffer.getWritePointer (1);
 
+    // modulation runs per chunk, so the parameters are re-read per chunk while it is in use
+    updateModulation (l, r, juce::jmin (kChunk, numSamples), ppq);
+    updateParameters();
+    updateLatency (false);
+
     for (int pos = 0; pos < numSamples; pos += kChunk)
-        processChunk (l + pos, r + pos, juce::jmin (kChunk, numSamples - pos));
+    {
+        const int n = juce::jmin (kChunk, numSamples - pos);
+        if (pos > 0)
+        {
+            const bool wasActive = modActive;
+            updateModulation (l + pos, r + pos, n, ppq + (double) pos / sr * hostBpm / 60.0);
+            if (modActive || wasActive)
+                updateParameters();
+        }
+        processChunk (l + pos, r + pos, n);
+    }
 }
 
 //==============================================================================
