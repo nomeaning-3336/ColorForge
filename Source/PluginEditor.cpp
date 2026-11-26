@@ -345,6 +345,22 @@ juce::Label* PixelLookAndFeel::createSliderTextBox (juce::Slider& s)
     return l;
 }
 
+juce::Rectangle<int> PixelLookAndFeel::getTooltipBounds (const juce::String& tipText, juce::Point<int> screenPos,
+                                                        juce::Rectangle<int> parentArea)
+{
+    const int w = (int) textWidth (tipText.toUpperCase(), 1.5f) + 20, h = 24;
+    return juce::Rectangle<int> (screenPos.x > parentArea.getCentreX() ? screenPos.x - (w + 12) : screenPos.x + 24,
+                                 screenPos.y > parentArea.getCentreY() ? screenPos.y - (h + 6) : screenPos.y + 6,
+                                 w, h).constrainedWithin (parentArea);
+}
+
+void PixelLookAndFeel::drawTooltip (juce::Graphics& g, const juce::String& text, int width, int height)
+{
+    windowFrame (g, { 0.0f, 0.0f, (float) width, (float) height }, U * 0.5f, pal::yellow.darker (0.2f), pal::panel);
+    drawTextIn (g, text.toUpperCase(), juce::Rectangle<float> ((float) width, (float) height).reduced (10.0f, 0.0f),
+                juce::Justification::centredLeft, 1.5f, pal::text);
+}
+
 //==============================================================================
 Knob::Knob (juce::AudioProcessorValueTreeState& apvts, juce::RangedAudioParameter& param,
             const juce::String& paramID, const juce::String& shortName, juce::Colour hue)
@@ -474,6 +490,16 @@ FxPanel::FxPanel (juce::AudioProcessorValueTreeState& apvts, const juce::String&
     updatePowerDim();
 }
 
+void FxPanel::addExtraCombo (juce::AudioProcessorValueTreeState& apvts, const juce::String& paramID)
+{
+    if (auto* p = apvts.getParameter (paramID))
+    {
+        addAndMakeVisible (extraCombos.add (new ChoiceControl (apvts, *p, paramID, juce::String(), colour)));
+        updatePowerDim();
+        resized();
+    }
+}
+
 void FxPanel::updatePowerDim()
 {
     const bool on = (power == nullptr) || power->button.getToggleState();
@@ -484,6 +510,8 @@ void FxPanel::updatePowerDim()
         t->setAlpha (alpha);
     if (combo != nullptr)
         combo->setAlpha (alpha);
+    for (auto* c : extraCombos)
+        c->setAlpha (alpha);
 }
 
 void FxPanel::paint (juce::Graphics& g)
@@ -517,6 +545,12 @@ void FxPanel::resized()
     {
         displayArea = r.removeFromTop (displayHeight);
         r.removeFromTop (6);
+    }
+
+    for (auto* c : extraCombos)
+    {
+        c->setBounds (r.removeFromTop (24).withWidth (juce::jmin (150, r.getWidth())));
+        r.removeFromTop (4);
     }
 
     if (combo != nullptr || ! toggles.isEmpty())
@@ -885,6 +919,11 @@ void EqGraph::paint (juce::Graphics& g)
             windowFrame (g, box, U * 0.5f, c, pal::bgAlt);
 
         drawTextIn (g, juce::String (b + 1), box, juce::Justification::centred, 1.0f, on ? pal::edgeDark : c);
+
+        const int mode = (int) paramValue (cf::eqId (b, "Mode"));
+        if (mode > 0)
+            drawTextIn (g, mode == 1 ? "M" : "S", box.translated (0.0f, box.getHeight() + 2.0f).withHeight (8.0f),
+                        juce::Justification::centred, 1.0f, c);
     }
 
     // readout for the band under the mouse
@@ -898,6 +937,9 @@ void EqGraph::paint (juce::Graphics& g)
             txt << "  " << (gdb >= 0.0f ? "+" : "") << juce::String (gdb, 1) << " DB";
         }
         txt << "  Q " << juce::String (paramValue (cf::eqId (shown, "Q")), 2);
+        const int mode = (int) paramValue (cf::eqId (shown, "Mode"));
+        if (mode > 0)
+            txt << (mode == 1 ? "  MID" : "  SIDE");
 
         auto box = juce::Rectangle<float> (textWidth (txt, 2.0f) + 20.0f, 26.0f).withPosition (plot.getX() + 8.0f, plot.getY() + 6.0f);
         windowFrame (g, box, U * 0.5f, pal::accent (shown), pal::panel);
@@ -1132,60 +1174,289 @@ void LoudnessHistory::paint (juce::Graphics& g)
 }
 
 //==============================================================================
-SignalPath::SignalPath (ColorForgeAudioProcessor& p) : processor (p)
+PresetBar::PresetBar (ColorForgeAudioProcessor& p) : processor (p)
 {
-    setInterceptsMouseClicks (false, false);
+    for (auto* b : { &prev, &next, &name, &slotA, &slotB })
+    {
+        b->getProperties().set ("pxScale", 1.5f);
+        addAndMakeVisible (*b);
+    }
+
+    prev.setTooltip ("Previous factory preset");
+    next.setTooltip ("Next factory preset");
+    name.setTooltip ("Presets: factory, your own, save");
+    slotA.setTooltip ("Snapshot A (click to switch; the preset menu can copy A to B)");
+    slotB.setTooltip ("Snapshot B");
+
+    for (auto* b : { &slotA, &slotB })
+    {
+        b->setColour (juce::TextButton::buttonOnColourId, px::pal::yellow.darker (0.3f));
+        b->getProperties().set ("pxScale", 2.0f);
+    }
+
+    prev.onClick  = [this] { step (-1); };
+    next.onClick  = [this] { step (1); };
+    name.onClick  = [this] { showMenu(); };
+    slotA.onClick = [this] { processor.switchToSlot (0); refresh(); };
+    slotB.onClick = [this] { processor.switchToSlot (1); refresh(); };
+    refresh();
+}
+
+void PresetBar::refresh()
+{
+    juce::String label = processor.getPresetName();
+    label << " " << (juce::juce_wchar) 3;
+    if (name.getButtonText() != label)
+        name.setButtonText (label);
+    slotA.setToggleState (processor.getActiveSlot() == 0, juce::dontSendNotification);
+    slotB.setToggleState (processor.getActiveSlot() == 1, juce::dontSendNotification);
+}
+
+void PresetBar::resized()
+{
+    auto r = getLocalBounds();
+    slotB.setBounds (r.removeFromRight (30));
+    r.removeFromRight (4);
+    slotA.setBounds (r.removeFromRight (30));
+    r.removeFromRight (8);
+    prev.setBounds (r.removeFromLeft (26));
+    r.removeFromLeft (4);
+    next.setBounds (r.removeFromRight (26));
+    r.removeFromRight (4);
+    name.setBounds (r);
+}
+
+juce::Array<juce::File> PresetBar::userPresets() const
+{
+    auto files = cf::userPresetFolder().findChildFiles (juce::File::findFiles, false, juce::String ("*") + cf::kPresetExtension);
+    files.sort();
+    return files;
+}
+
+void PresetBar::step (int delta)
+{
+    const int n = cf::kNumFactoryPresets;
+    processor.applyFactoryPreset (((processor.getCurrentProgram() + delta) % n + n) % n);
+    refresh();
+}
+
+void PresetBar::showMenu()
+{
+    juce::PopupMenu menu, factory, user;
+
+    for (int i = 0; i < cf::kNumFactoryPresets; ++i)
+        factory.addItem (1 + i, cf::kFactoryPresets[i].name, true,
+                         processor.getPresetName() == juce::String (cf::kFactoryPresets[i].name));
+
+    const auto files = userPresets();
+    for (int i = 0; i < files.size(); ++i)
+        user.addItem (1000 + i, files[i].getFileNameWithoutExtension().toUpperCase());
+    if (files.isEmpty())
+        user.addItem (999, "(NONE SAVED YET)", false);
+
+    menu.addSubMenu ("FACTORY", factory);
+    menu.addSubMenu ("MY PRESETS", user);
+    menu.addSeparator();
+    menu.addItem (2, "SAVE PRESET...");
+    menu.addItem (3, "LOAD FROM FILE...");
+    menu.addItem (4, "SHOW PRESET FOLDER");
+    menu.addSeparator();
+    menu.addItem (5, processor.getActiveSlot() == 0 ? "COPY A TO B" : "COPY B TO A");
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&name),
+        [this, files] (int result)
+        {
+            if (result >= 1 && result <= cf::kNumFactoryPresets)
+                processor.applyFactoryPreset (result - 1);
+            else if (result >= 1000 && result - 1000 < files.size())
+                processor.loadPreset (files[result - 1000]);
+            else if (result == 2 || result == 3)
+            {
+                const bool saving = result == 2;
+                cf::userPresetFolder().createDirectory();
+                chooser = std::make_unique<juce::FileChooser> (saving ? "Save preset" : "Load preset",
+                                                               cf::userPresetFolder(), juce::String ("*") + cf::kPresetExtension);
+                const int flags = saving ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting)
+                                         : juce::FileBrowserComponent::openMode;
+                chooser->launchAsync (flags | juce::FileBrowserComponent::canSelectFiles,
+                    [this, saving] (const juce::FileChooser& fc)
+                    {
+                        auto f = fc.getResult();
+                        if (f == juce::File())
+                            return;
+                        if (saving)
+                            processor.savePreset (f.withFileExtension (cf::kPresetExtension));
+                        else
+                            processor.loadPreset (f);
+                        refresh();
+                    });
+            }
+            else if (result == 4)
+            {
+                cf::userPresetFolder().createDirectory();
+                cf::userPresetFolder().startAsProcess();
+            }
+            else if (result == 5)
+                processor.copyActiveToOtherSlot();
+
+            refresh();
+        });
+}
+
+//==============================================================================
+SignalPath::SignalPath (ColorForgeAudioProcessor& p) : processor (p) {}
+
+int SignalPath::moduleAtNode (int node) const
+{
+    switch (node)
+    {
+        case 0: return -1;
+        case 1: return -2;
+        case 6: return -3;
+        case 7: return -4;
+        default: return processor.getChainOrder()[(size_t) (node - 2)];
+    }
+}
+
+void SignalPath::resized()
+{
+    layoutNodes();
+}
+
+void SignalPath::layoutNodes()
+{
+    auto inner = getLocalBounds().toFloat().reduced (16.0f, 12.0f);
+    inner.removeFromTop (30.0f);
+    hintArea = inner.removeFromBottom (14.0f);
+
+    // two rows, snaking like a level map
+    constexpr int perRow = 4;
+    const float cellW = inner.getWidth() / (float) perRow;
+    const float rowH = juce::jmin (90.0f, inner.getHeight() / 2.0f);
+
+    for (int i = 0; i < kNodes; ++i)
+    {
+        const int row = i / perRow, col = row % 2 == 0 ? i % perRow : perRow - 1 - i % perRow;
+        const juce::Point<float> c { inner.getX() + cellW * ((float) col + 0.5f), inner.getY() + rowH * ((float) row + 0.5f) };
+        nodeBoxes[(size_t) i] = juce::Rectangle<float> (juce::jmin (cellW - 12.0f, 84.0f), 30.0f).withCentre (c);
+    }
+}
+
+int SignalPath::nodeAt (juce::Point<float> pos) const
+{
+    for (int i = 0; i < kNodes; ++i)
+        if (nodeBoxes[(size_t) i].expanded (4.0f).contains (pos))
+            return i;
+    return -1;
+}
+
+void SignalPath::mouseDown (const juce::MouseEvent& e)
+{
+    const int n = nodeAt (e.position);
+    dragNode = (n >= 2 && n <= 5) ? n : -1;
+    dragPos = e.position;
+}
+
+void SignalPath::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragNode < 0)
+        return;
+    dragPos = e.position;
+    repaint();
+}
+
+void SignalPath::mouseUp (const juce::MouseEvent& e)
+{
+    const int target = nodeAt (e.position);
+
+    if (dragNode >= 2 && target >= 2 && target <= 5 && target != dragNode)
+    {
+        auto order = processor.getChainOrder();
+        const int moved = order[(size_t) dragNode - 2];
+        // move the dragged module to the target slot, shifting the others along
+        std::vector<int> v (order.begin(), order.end());
+        v.erase (v.begin() + (dragNode - 2));
+        v.insert (v.begin() + (target - 2), moved);
+        for (size_t i = 0; i < order.size(); ++i)
+            order[i] = v[i];
+        processor.setChainOrder (order);
+    }
+
+    dragNode = -1;
+    repaint();
 }
 
 void SignalPath::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds().toFloat();
     windowFrame (g, r, U, pal::purple.darker (0.3f), pal::panel);
-    auto inner = r.reduced (16.0f, 12.0f);
-    drawTextIn (g, "SIGNAL PATH", inner.removeFromTop (22.0f), juce::Justification::centredLeft, 2.0f, pal::text);
-    inner.removeFromTop (8.0f);
+    drawTextIn (g, "SIGNAL PATH", r.reduced (16.0f, 12.0f).removeFromTop (22.0f), juce::Justification::centredLeft, 2.0f, pal::text);
 
     auto on = [this] (const char* id) { return id == nullptr || processor.apvts.getRawParameterValue (id)->load() > 0.5f; };
 
     struct Node { const char* name; const char* id; juce::Colour c; };
-    const Node nodes[] = {
-        { "IN",     nullptr,   pal::cyan },   { "COLOR",  "colorOn", pal::pink },
-        { "EQ",     "eqOn",    pal::yellow }, { "COMP",   "cpOn",    pal::orange },
-        { "SAT",    "satOn",   pal::red },    { "STEREO", "imgOn",   pal::blue },
-        { "LIMIT",  "limit",   pal::red },    { "OUT",    nullptr,   pal::green } };
-    constexpr int n = (int) (sizeof (nodes) / sizeof (nodes[0]));
-
-    // two rows, snaking like a level map
-    const int perRow = 4;
-    const float cellW = inner.getWidth() / (float) perRow;
-    const float rowH = juce::jmin (90.0f, inner.getHeight() / 2.0f);
-    std::array<juce::Point<float>, n> centres {};
-
-    for (int i = 0; i < n; ++i)
+    auto describe = [] (int what) -> Node
     {
-        const int row = i / perRow, col = row % 2 == 0 ? i % perRow : perRow - 1 - i % perRow;
-        centres[(size_t) i] = { inner.getX() + cellW * ((float) col + 0.5f), inner.getY() + rowH * ((float) row + 0.5f) };
+        switch (what)
+        {
+            case -1: return { "IN",     nullptr,   pal::cyan };
+            case -2: return { "COLOR",  "colorOn", pal::pink };
+            case -3: return { "LIMIT",  "limit",   pal::red };
+            case -4: return { "OUT",    nullptr,   pal::green };
+            case ColorForgeAudioProcessor::modEq:   return { "EQ",     "eqOn",  pal::yellow };
+            case ColorForgeAudioProcessor::modComp: return { "COMP",   "cpOn",  pal::orange };
+            case ColorForgeAudioProcessor::modSat:  return { "SAT",    "satOn", pal::red };
+            default:                                return { "STEREO", "imgOn", pal::blue };
+        }
+    };
+
+    std::array<Node, kNodes> nodes;
+    for (int i = 0; i < kNodes; ++i)
+        nodes[(size_t) i] = describe (moduleAtNode (i));
+
+    for (int i = 0; i + 1 < kNodes; ++i)
+    {
+        const bool live = on (nodes[(size_t) i].id) && on (nodes[(size_t) i + 1].id);
+        pixelLine (g, nodeBoxes[(size_t) i].getCentre(), nodeBoxes[(size_t) i + 1].getCentre(), U, 2 * U,
+                   live ? pal::edgeLight.withAlpha (0.7f) : pal::edgeMid.withAlpha (0.5f));
     }
 
-    for (int i = 0; i + 1 < n; ++i)
-    {
-        const bool live = on (nodes[i].id) && on (nodes[i + 1].id);
-        pixelLine (g, centres[(size_t) i], centres[(size_t) i + 1], U, 2 * U, live ? pal::edgeLight.withAlpha (0.7f) : pal::edgeMid.withAlpha (0.5f));
-    }
+    const int hover = dragNode >= 0 ? nodeAt (dragPos) : -1;
 
-    for (int i = 0; i < n; ++i)
+    for (int i = 0; i < kNodes; ++i)
     {
-        const bool active = on (nodes[i].id);
-        auto box = juce::Rectangle<float> (juce::jmin (cellW - 12.0f, 84.0f), 30.0f).withCentre (centres[(size_t) i]);
+        const auto& n = nodes[(size_t) i];
+        const bool active = on (n.id);
+        auto box = nodeBoxes[(size_t) i];
+
+        if (dragNode >= 0 && i == hover && i != dragNode && i >= 2 && i <= 5)
+            fillBox (g, box.expanded (3 * U), U, pal::yellow);
+
         if (active)
-            bevel (g, box, U, nodes[i].c.darker (0.2f), false);
+            bevel (g, box, U, n.c.darker (0.2f), i == dragNode);
         else
-            windowFrame (g, box, U * 0.5f, nodes[i].c.withAlpha (0.5f), pal::bgAlt);
-        drawTextIn (g, nodes[i].name, box.reduced (4.0f, 0.0f), juce::Justification::centred, 2.0f,
+            windowFrame (g, box, U * 0.5f, n.c.withAlpha (0.5f), pal::bgAlt);
+
+        drawTextIn (g, n.name, box.reduced (4.0f, 0.0f), juce::Justification::centred, 2.0f,
                     active ? pal::edgeDark : pal::dim);
+
+        if (i >= 2 && i <= 5)   // movable: little grip marks
+        {
+            g.setColour ((active ? pal::edgeDark : pal::dim).withAlpha (0.6f));
+            g.fillRect (std::round (box.getX() + 3 * U), std::round (box.getCentreY() - 2 * U), U, U);
+            g.fillRect (std::round (box.getX() + 3 * U), std::round (box.getCentreY() + U), U, U);
+        }
     }
 
-    drawTextIn (g, "LIT = ON  \x04  DIM = BYPASSED", inner.removeFromBottom (14.0f), juce::Justification::centredLeft, 1.5f, pal::dim);
+    if (dragNode >= 0)
+    {
+        auto ghost = nodeBoxes[(size_t) dragNode].withCentre (dragPos);
+        windowFrame (g, ghost, U * 0.5f, pal::yellow, pal::panel.withAlpha (0.85f));
+        drawTextIn (g, nodes[(size_t) dragNode].name, ghost.reduced (4.0f, 0.0f), juce::Justification::centred, 2.0f, pal::yellow);
+    }
+
+    drawTextIn (g, "DRAG A MIDDLE BLOCK TO REORDER  \x04  DIM = OFF", hintArea,
+                juce::Justification::centredLeft, 1.5f, pal::dim);
 }
 
 //==============================================================================
@@ -1453,6 +1724,8 @@ ColorForgeAudioProcessorEditor::ColorForgeAudioProcessorEditor (ColorForgeAudioP
 
     status = std::make_unique<StatusPanel> (audioProcessor);
     addAndMakeVisible (*status);
+    presetBar = std::make_unique<PresetBar> (audioProcessor);
+    addAndMakeVisible (*presetBar);
 
     // ---- COLOR
     colorPower = std::make_unique<ToggleControl> (apvts, "colorOn", "COLOR FX", pal::pink, false);
@@ -1513,6 +1786,7 @@ ColorForgeAudioProcessorEditor::ColorForgeAudioProcessorEditor (ColorForgeAudioP
         eqBands[(size_t) b] = std::make_unique<FxPanel> (apvts, bandTitles[b], pal::accent (b), on.toRawUTF8(),
                                                          isCut ? slope.toRawUTF8() : nullptr,
                                                          std::vector<ToggleSpec> {}, knobs, 1);
+        eqBands[(size_t) b]->addExtraCombo (apvts, cf::eqId (b, "Mode"));
         addTo (pageEq, eqBands[(size_t) b].get());
     }
 
@@ -1586,6 +1860,7 @@ void ColorForgeAudioProcessorEditor::timerCallback()
 
     loudnessHistory->update();   // keeps collecting while hidden
     status->update();
+    presetBar->refresh();
 }
 
 void ColorForgeAudioProcessorEditor::paint (juce::Graphics& g)
@@ -1633,6 +1908,7 @@ void ColorForgeAudioProcessorEditor::resized()
     header.removeFromLeft (290);
     header = header.withSizeKeepingCentre (header.getWidth(), 36);
     auto statusCol = r.withTrimmedLeft (r.getWidth() - 270);
+    presetBar->setBounds (statusCol.getX(), header.getY() + 4, statusCol.getWidth(), 28);
 
     auto tabRow = header.withTrimmedRight (statusCol.getWidth() + 10);
     const int tabW = (tabRow.getWidth() - 3 * 8) / numPages;

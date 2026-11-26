@@ -97,6 +97,8 @@ inline constexpr int kNumLoudnessTargets = (int) (sizeof (kLoudnessTargets) / si
 //   Saturator : satOn satMode satDrive satTone satMix satOut
 //   Stereo    : imgOn imgWidth imgMonoOn imgMonoFreq imgBalance
 //   Limiter   : limit (v1) lmMode lmGain lmCeiling lmRelease
+// Version 3:
+//   EQ        : eq1Mode..eq8Mode (Stereo / Mid / Side)
 inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
     using namespace juce;
@@ -264,6 +266,17 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     addFloat  ("lmGain", "Limiter Gain", NormalisableRange<float> (0.0f, 24.0f, 0.1f), 0.0f, "dB");
     addFloat  ("lmCeiling", "Limiter Ceiling", NormalisableRange<float> (-12.0f, 0.0f, 0.1f), -1.0f, "dBTP");
     addFloat  ("lmRelease", "Limiter Release", skewed (1.0f, 1000.0f, 0.1f, 100.0f), 100.0f, "ms");
+
+    // =========================================================================
+    // Version 3: per-band stereo / mid / side processing
+    ver = 3;
+    {
+        static const char* names[kEqBands] = { "Low Cut", "Low Shelf", "Bell 1", "Bell 2",
+                                               "Bell 3", "Bell 4", "High Shelf", "High Cut" };
+        for (int b = 0; b < kEqBands; ++b)
+            addChoice (eqId (b, "Mode").toRawUTF8(), (String ("EQ ") + names[b] + " Mode").toRawUTF8(),
+                       { "Stereo", "Mid", "Side" }, 0);
+    }
 
     return layout;
 }

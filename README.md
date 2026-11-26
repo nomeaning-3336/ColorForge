@@ -8,18 +8,21 @@ More pages: [MASTER](docs/screenshot-master.png) · [DYNAMICS](docs/screenshot-d
 
 ## Signal chain
 
-`Input → Color FX → EQ → Compressor → Saturator → Stereo → Output → Limiter → Meters`
+`Input → Color FX → [EQ · Compressor · Saturator · Stereo, in any order] → Output → Limiter → Meters`
 
 Every module has its own bypass, and every control is a host parameter, so all of it can be automated in a DAW. The editor has four pages (COLOR, EQ, DYNAMICS, MASTER) and an always-visible STATUS column.
 
 | Module | What it does |
 | --- | --- |
-| **EQ** | 8 bands: low cut and high cut (12 / 24 / 36 / 48 dB per octave), low and high shelf, four bells. Drag the numbered dots on the graph (wheel = Q, double-click = on/off) over the live spectrum. |
+| **EQ** | 8 bands: low cut and high cut (12 / 24 / 36 / 48 dB per octave), low and high shelf, four bells. Each band works on stereo, mid only or side only. Drag the numbered dots on the graph (wheel = Q, double-click = on/off) over the live spectrum. |
 | **Compressor** | Stereo-linked bus compressor: threshold, ratio, attack, release, soft knee, makeup or auto gain, parallel mix, sidechain high-pass. Transfer curve and gain-reduction history. |
 | **Saturator** | Tape, tube and clip curves with drive, tilt tone, mix and output; the level is kept roughly constant as you drive it. |
 | **Stereo** | Mid/side width, mono bass below a chosen frequency, balance. |
 | **Limiter** | Lookahead brickwall limiter with 4x true-peak detection: gain, ceiling (dBTP), release. `Clip` mode is the soft clipper from v1. About 1.6 ms of latency. |
 | **Meters** | Sample peak, LUFS momentary / short-term / integrated (BS.1770 / EBU R128 gating), true peak, phase correlation, compressor and limiter gain reduction, and a 60-second loudness map. |
+| **Presets** | Factory starting points (mix bus glue, streaming and club masters, vocal, drums, tape, wide + mono bass, the v1 color-bass sound) from the bar at the top right, plus your own presets saved as `.cfpreset` files in `Documents/ColorForge/Presets`. Hosts see the factory presets as programs. |
+| **A/B** | Two snapshots for comparing settings; the preset menu copies one into the other. Kept for the session, not saved with the project. |
+| **Chain order** | Drag EQ, COMP, SAT and STEREO around on the DYNAMICS page's signal-path map. The order is saved with the session and in presets. |
 | **Loudness quest** | Pick a target (club, loud, streaming -14, podcast, broadcast). Keep the short-term loudness within 1 LU of it for 30 seconds without overshooting the ceiling to clear the stage. |
 
 ### Color FX (the original ColorForge chain)

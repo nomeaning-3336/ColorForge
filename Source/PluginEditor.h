@@ -47,6 +47,10 @@ public:
                                     int& idealWidth, int& idealHeight) override;
 
     juce::Label* createSliderTextBox (juce::Slider&) override;
+
+    juce::Rectangle<int> getTooltipBounds (const juce::String& tipText, juce::Point<int> screenPos,
+                                           juce::Rectangle<int> parentArea) override;
+    void drawTooltip (juce::Graphics&, const juce::String& text, int width, int height) override;
 };
 
 //==============================================================================
@@ -123,6 +127,9 @@ public:
     juce::Rectangle<int> getDisplayArea() const noexcept   { return displayArea; }
     juce::Colour getAccent() const noexcept                { return colour; }
 
+    /** Adds another mode box on its own row, above the main combo / toggles row. */
+    void addExtraCombo (juce::AudioProcessorValueTreeState&, const juce::String& paramID);
+
 private:
     void updatePowerDim();
 
@@ -133,6 +140,7 @@ private:
 
     std::unique_ptr<ToggleControl> power;
     std::unique_ptr<ChoiceControl> combo;
+    juce::OwnedArray<ChoiceControl> extraCombos;
     juce::OwnedArray<ToggleControl> toggles;
     juce::OwnedArray<Knob> knobs;
 
@@ -261,15 +269,52 @@ private:
 };
 
 //==============================================================================
+/** Header strip: previous / preset menu / next, and the A/B snapshot buttons. */
+class PresetBar : public juce::Component
+{
+public:
+    explicit PresetBar (ColorForgeAudioProcessor&);
+
+    void refresh();
+    void resized() override;
+
+private:
+    void showMenu();
+    void step (int delta);
+    juce::Array<juce::File> userPresets() const;
+
+    ColorForgeAudioProcessor& processor;
+    juce::TextButton prev { "<" }, next { ">" }, name, slotA { "A" }, slotB { "B" };
+    std::unique_ptr<juce::FileChooser> chooser;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PresetBar)
+};
+
+//==============================================================================
 /** The processing chain drawn as a game-style level map; lit nodes are on. */
 class SignalPath : public juce::Component
 {
 public:
     explicit SignalPath (ColorForgeAudioProcessor&);
     void paint (juce::Graphics&) override;
+    void resized() override;
+
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
 
 private:
+    static constexpr int kNodes = 8;
+    void layoutNodes();
+    int nodeAt (juce::Point<float>) const;
+    /** Node index -> what it is: -1 IN, -2 COLOR, -3 LIMIT, -4 OUT, or a chain module (0..3). */
+    int moduleAtNode (int node) const;
+
     ColorForgeAudioProcessor& processor;
+    std::array<juce::Rectangle<float>, kNodes> nodeBoxes;
+    juce::Rectangle<float> hintArea;
+    int dragNode = -1;
+    juce::Point<float> dragPos;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SignalPath)
 };
@@ -325,12 +370,14 @@ private:
     ColorForgeAudioProcessor& audioProcessor;
     cfui::PixelLookAndFeel lnf;
     cfui::SpectrumSource spectrum;
+    juce::TooltipWindow tooltips { this, 700 };
 
     std::array<std::unique_ptr<juce::TextButton>, numPages> tabs;
     std::array<std::vector<juce::Component*>, numPages> pageComponents;
     int currentPage = pageColor;
 
     std::unique_ptr<cfui::StatusPanel> status;
+    std::unique_ptr<cfui::PresetBar> presetBar;
 
     // COLOR
     std::unique_ptr<cfui::SpectrumAnalyzer> analyzer;

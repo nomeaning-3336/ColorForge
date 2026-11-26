@@ -31,7 +31,7 @@ reference: ColorForge implements its own DSP and its own look.
 
 Each phase ships as its own pull request and keeps the MinGW build working.
 
-### Phase 1: mix & master core (in progress)
+### Phase 1: mix & master core (done, PR #1)
 - **Parametric EQ**: 8 bands (low cut, low shelf, four bells, high shelf, high cut), each with on/off, frequency, gain, Q; curve drawn over the live spectrum.
 - **Bus compressor**: threshold, ratio, attack, release, knee, makeup with auto makeup, parallel mix, sidechain high-pass, gain reduction meter.
 - **Saturator**: tape, tube and hard-clip curves with drive, tone and mix.
@@ -42,11 +42,11 @@ Each phase ships as its own pull request and keeps the MinGW build working.
 - **8-bit game UI**: pixel font, pixel knobs and switches, a limited palette, tabbed "worlds" (COLOR, EQ, DYNAMICS, MASTER), HP-bar style meters and a loudness-target "quest" readout.
 
 ### Phase 2: workflow
-- Factory presets (mix bus, master, vocal, drums, color bass) and user presets on disk.
-- A/B snapshots and gain-matched bypass.
-- Reorderable module chain.
-- Mid/side mode per EQ band, and dynamic EQ bands.
-- Multiband controls on the existing OTT (movable crossovers, solo).
+- Done: factory presets (mix bus, master, vocal, drums, color bass) and user presets on disk.
+- Done: A/B snapshots.
+- Done: reorderable module chain (EQ, compressor, saturator, stereo).
+- Done: mid/side mode per EQ band.
+- Next: dynamic EQ bands, gain-matched bypass, multiband controls on the existing OTT (movable crossovers, solo).
 
 ### Phase 3: modulation & automation in the standalone program
 - Two LFOs and an envelope follower, each assignable to any parameter, with tempo sync in the plugin.
