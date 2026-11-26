@@ -5,12 +5,13 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
 
 namespace
 {
-const juce::Colour kBackground { 0xff0a0c16 };
-const juce::Colour kPanel      { 0xff141828 };
-const juce::Colour kText       { 0xffd8dcf0 };
+const juce::Colour kBackground = cfui::px::pal::bg;
+const juce::Colour kPanel      = cfui::px::pal::panel;
+const juce::Colour kText       = cfui::px::pal::text;
 
 //==============================================================================
 /** Plays an audio file through the ColorForge processor to the audio device. */
@@ -284,8 +285,7 @@ public:
     void paint (juce::Graphics& g) override
     {
         const auto area = getLocalBounds().toFloat().reduced (1.0f);
-        g.setColour (kPanel);
-        g.fillRoundedRectangle (area, 6.0f);
+        cfui::px::bevel (g, getLocalBounds().toFloat(), 2.0f, highlight ? cfui::px::pal::panelHi : cfui::px::pal::bgAlt, true);
 
         const double length = thumbnail.getTotalLength();
 
@@ -311,14 +311,10 @@ public:
         }
         else
         {
-            g.setColour (kText.withAlpha (0.75f));
-            g.setFont (juce::Font (juce::FontOptions (15.0f)));
-            g.drawText ("Drop an audio file anywhere in this window   (WAV / AIFF / FLAC / OGG / MP3)",
-                        getLocalBounds(), juce::Justification::centred);
+            cfui::px::drawTextIn (g, "DROP AN AUDIO FILE ANYWHERE IN THIS WINDOW  (WAV / AIFF / FLAC / OGG / MP3)",
+                                  area, juce::Justification::centred, 2.0f,
+                                  highlight ? cfui::px::pal::yellow : cfui::px::pal::dim);
         }
-
-        g.setColour (highlight ? juce::Colours::white : kText.withAlpha (0.15f));
-        g.drawRoundedRectangle (area, 6.0f, highlight ? 2.0f : 1.0f);
     }
 
     void mouseDown (const juce::MouseEvent& e) override     { seek (e); }
@@ -356,6 +352,7 @@ public:
     PlayerComponent()
     {
         setOpaque (true);
+        setLookAndFeel (&lnf);
 
         editor.reset (engine.processor.createEditor());
         addAndMakeVisible (*editor);
@@ -405,6 +402,12 @@ public:
         addAndMakeVisible (keyboard);
         keyboard.setAvailableRange (36, 96);
 
+        for (juce::Component* c : { (juce::Component*) &openButton, (juce::Component*) &playButton,
+                                    (juce::Component*) &loopButton, (juce::Component*) &exportButton,
+                                    (juce::Component*) &audioButton, (juce::Component*) &gainLabel,
+                                    (juce::Component*) &statusLabel })
+            c->getProperties().set ("pxScale", 1.5f);
+
         setWantsKeyboardFocus (true);
         setSize (editor->getWidth(), kTopBar + kWave + editor->getHeight() + kKeys);
         startTimerHz (10);
@@ -413,6 +416,7 @@ public:
     ~PlayerComponent() override
     {
         stopTimer();
+        setLookAndFeel (nullptr);
 
         if (editor != nullptr)
         {
@@ -454,12 +458,13 @@ public:
         top.removeFromLeft (6);
         playButton.setBounds (top.removeFromLeft (84));
         top.removeFromLeft (10);
-        loopButton.setBounds (top.removeFromLeft (70));
-        exportButton.setBounds (top.removeFromLeft (100));
-        audioButton.setBounds (top.removeFromRight (120));
+        loopButton.setBounds (top.removeFromLeft (80));
+        top.removeFromLeft (6);
+        exportButton.setBounds (top.removeFromLeft (124));
+        audioButton.setBounds (top.removeFromRight (176));
         top.removeFromRight (10);
         gainSlider.setBounds (top.removeFromRight (250));
-        gainLabel.setBounds (top.removeFromRight (48));
+        gainLabel.setBounds (top.removeFromRight (64));
         statusLabel.setBounds (top.reduced (6, 0));
 
         waveform.setBounds (area.removeFromTop (kWave).reduced (8, 2));
@@ -573,6 +578,7 @@ private:
 
     PlayerEngine engine;
     WaveformView waveform { engine };
+    cfui::PixelLookAndFeel lnf;
     juce::MidiKeyboardComponent keyboard { engine.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard };
     juce::TextButton openButton { "Open..." }, playButton { "Play" }, exportButton { "Export WAV" },
                      audioButton { "Audio Settings" };

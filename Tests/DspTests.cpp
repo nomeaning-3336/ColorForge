@@ -187,11 +187,75 @@ void testProcessor()
     proc.processBlock (buf, midi);
     check (proc.getLatencySamples() == base, "Latency with the pitch map off", proc.getLatencySamples(), "samples");
 }
+
+/** Renders each editor page to a PNG after feeding the processor some audio. */
+int snapshot (const juce::File& dir)
+{
+    dir.createDirectory();
+
+    for (int page = 0; page < 4; ++page)
+    {
+        ColorForgeAudioProcessor proc;
+        auto setParam = [&proc] (const char* id, float plain)
+        {
+            auto* prm = proc.apvts.getParameter (id);
+            prm->setValueNotifyingHost (prm->convertTo0to1 (plain));
+        };
+
+        // a mix-ish setting so every meter and display has something to show
+        setParam ("cpOn", 1.0f);          setParam ("cpThresh", -24.0f);   setParam ("cpRatio", 3.0f);
+        setParam ("eq2Gain", 3.0f);       setParam ("eq4Gain", -4.0f);     setParam ("eq4Q", 2.0f);
+        setParam ("eq6Gain", 2.5f);       setParam ("eq1On", 1.0f);        setParam ("satOn", 1.0f);
+        setParam ("lmGain", 6.0f);
+        if (page == 0)
+            setParam ("colorOn", 1.0f);
+        proc.apvts.state.setProperty ("uiPage", page, nullptr);
+
+        proc.setRateAndBufferSizeDetails (kSr, 512);
+        proc.prepareToPlay (kSr, 512);
+
+        std::mt19937 rng (7);
+        std::normal_distribution<float> nd (0.0f, 1.0f);
+        juce::AudioBuffer<float> buf (2, 512);
+        juce::MidiBuffer midi;
+        double ph = 0.0;
+        float pinkL = 0.0f, pinkR = 0.0f;
+        for (int blk = 0; blk < (int) (kSr * 8 / 512); ++blk)
+        {
+            for (int i = 0; i < 512; ++i)
+            {
+                pinkL = 0.985f * pinkL + 0.05f * nd (rng);
+                pinkR = 0.985f * pinkR + 0.05f * nd (rng);
+                const float kick = (float) (0.5 * std::sin (ph) * std::exp (-std::fmod (blk * 512 + i, 24000) / 3000.0));
+                ph += 2.0 * kPi * 55.0 / kSr;
+                buf.setSample (0, i, 0.3f * pinkL + kick + 0.05f * (float) std::sin (ph * 8.0));
+                buf.setSample (1, i, 0.3f * pinkR + kick + 0.05f * (float) std::sin (ph * 8.0 + 0.5));
+            }
+            proc.processBlock (buf, midi);
+        }
+
+        std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
+        ed->setVisible (true);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (400);
+
+        const auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+        auto file = dir.getChildFile ("page" + juce::String (page + 1) + ".png");
+        file.deleteFile();
+        juce::FileOutputStream out (file);
+        juce::PNGImageFormat().writeImageToStream (img, out);
+        std::printf ("wrote %s\n", file.getFullPathName().toRawUTF8());
+        proc.editorBeingDeleted (ed.get());
+    }
+    return 0;
+}
 } // namespace
 
-int main()
+int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
+
+    if (argc > 2 && juce::String (argv[1]) == "--snapshot")
+        return snapshot (juce::File (juce::String (argv[2])));
 
     testEq();
     testLimiter();
