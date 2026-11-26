@@ -11,18 +11,6 @@ namespace
 
     constexpr int kResonatorBaseNote = 48;   // C3
 
-    inline float softClip (float x) noexcept
-    {
-        constexpr float knee = 0.75f;
-        const float a = std::abs (x);
-
-        if (a <= knee)
-            return x;
-
-        const float y = knee + (1.0f - knee) * std::tanh ((a - knee) / (1.0f - knee));
-        return x < 0.0f ? -y : y;
-    }
-
     inline std::uint16_t rotateMask (std::uint16_t mask, int semis) noexcept
     {
         semis = ((semis % 12) + 12) % 12;
@@ -41,13 +29,21 @@ namespace
 }
 
 //==============================================================================
-void ColorForgeAudioProcessor::StereoDelay::prepare (int delaySamples)
+void ColorForgeAudioProcessor::StereoDelay::prepare (int maxDelaySamples)
 {
-    size = juce::jmax (0, delaySamples);
+    for (auto& b : buf)
+        b.assign ((size_t) juce::jmax (1, maxDelaySamples), 0.0f);
+
+    setDelay (maxDelaySamples);
+}
+
+void ColorForgeAudioProcessor::StereoDelay::setDelay (int delaySamples) noexcept
+{
+    size = juce::jlimit (0, (int) buf[0].size(), delaySamples);
     pos = 0;
 
     for (auto& b : buf)
-        b.assign ((size_t) juce::jmax (1, size), 0.0f);
+        std::fill (b.begin(), b.end(), 0.0f);
 }
 
 void ColorForgeAudioProcessor::StereoDelay::process (float* l, float* r, int num) noexcept
@@ -107,6 +103,34 @@ ColorForgeAudioProcessor::ColorForgeAudioProcessor()
     p.ottOn = ref ("ottOn");          p.ottDepth = ref ("ottDepth");    p.ottTime = ref ("ottTime");
     p.ottUp = ref ("ottUp");          p.ottDown = ref ("ottDown");      p.ottLow = ref ("ottLow");
     p.ottMid = ref ("ottMid");        p.ottHigh = ref ("ottHigh");
+
+    p.inGain = ref ("inGain");        p.colorOn = ref ("colorOn");      p.eqOn = ref ("eqOn");
+
+    for (int b = 0; b < cf::kEqBands; ++b)
+    {
+        p.eqBandOn[b] = ref (cf::eqId (b, "On").toRawUTF8());
+        p.eqFreq[b]   = ref (cf::eqId (b, "Freq").toRawUTF8());
+        p.eqGain[b]   = ref (cf::eqId (b, "Gain").toRawUTF8());
+        p.eqQ[b]      = ref (cf::eqId (b, "Q").toRawUTF8());
+    }
+    p.eqLoSlope = ref (cf::eqId (0, "Slope").toRawUTF8());
+    p.eqHiSlope = ref (cf::eqId (cf::kEqBands - 1, "Slope").toRawUTF8());
+
+    p.cpOn = ref ("cpOn");            p.cpThresh = ref ("cpThresh");    p.cpRatio = ref ("cpRatio");
+    p.cpAttack = ref ("cpAttack");    p.cpRelease = ref ("cpRelease");  p.cpKnee = ref ("cpKnee");
+    p.cpMakeup = ref ("cpMakeup");    p.cpAuto = ref ("cpAuto");        p.cpMix = ref ("cpMix");
+    p.cpScHpf = ref ("cpScHpf");
+
+    p.satOn = ref ("satOn");          p.satMode = ref ("satMode");      p.satDrive = ref ("satDrive");
+    p.satTone = ref ("satTone");      p.satMix = ref ("satMix");        p.satOut = ref ("satOut");
+
+    p.imgOn = ref ("imgOn");          p.imgWidth = ref ("imgWidth");    p.imgMonoOn = ref ("imgMonoOn");
+    p.imgMonoFreq = ref ("imgMonoFreq"); p.imgBalance = ref ("imgBalance");
+
+    p.lmMode = ref ("lmMode");        p.lmGain = ref ("lmGain");        p.lmCeiling = ref ("lmCeiling");
+    p.lmRelease = ref ("lmRelease");
+
+    apvts.state.setProperty (kLufsTargetProp, 2, nullptr);   // streaming, -14 LUFS
 }
 
 bool ColorForgeAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -128,11 +152,17 @@ void ColorForgeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     pitchMap.prepare (sampleRate);
     ott.prepare (sampleRate);
 
-    // The pitch map is the only latent stage and always stays in the path, so latency is constant.
-    const int latency = pitchMap.getLatencySamples();
-    setLatencySamples (latency);
-    subDelay.prepare (latency);
-    dryDelay.prepare (latency);
+    eq.prepare (sampleRate, kChunk);
+    comp.prepare (sampleRate);
+    sat.prepare (sampleRate);
+    imager.prepare (sampleRate);
+    limiter.prepare (sampleRate);
+    meter.prepare (sampleRate);
+
+    // The dry and kept-sub paths are delayed to match the pitch map, but only while the
+    // pitch map is in use; the limiter's lookahead is always there.
+    subDelay.prepare (pitchMap.getLatencySamples());
+    dryDelay.prepare (pitchMap.getLatencySamples());
 
     const juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) kChunk, 2 };
     chorus.prepare (spec);
@@ -149,7 +179,7 @@ void ColorForgeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     reverb.reset();
     reverbWasOn = true;
 
-    for (auto* s : { &driveSm, &widthSm, &mixSm, &gainSm, &subSm })
+    for (auto* s : { &driveSm, &widthSm, &mixSm, &gainSm, &subSm, &inGainSm, &colorSm })
         s->reset (sampleRate, 0.03);
 
     driveSm.setCurrentAndTargetValue (pct (p.drive));
@@ -157,9 +187,35 @@ void ColorForgeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     mixSm.setCurrentAndTargetValue (pct (p.mix));
     gainSm.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (val (p.outGain)));
     subSm.setCurrentAndTargetValue (isOn (p.subOn) ? 1.0f : 0.0f);
+    inGainSm.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (val (p.inGain)));
+    colorOn = isOn (p.colorOn);
+    colorSm.setCurrentAndTargetValue (colorOn ? 1.0f : 0.0f);
 
     lfoPhase = 0.0;
     held.reset();
+
+    updateParameters();
+    updateLatency (true);
+}
+
+//==============================================================================
+void ColorForgeAudioProcessor::updateLatency (bool force)
+{
+    const bool wantPitchMap = colorOn && isOn (p.pmOn);
+
+    if (wantPitchMap == pitchMapActive && ! force)
+        return;
+
+    pitchMapActive = wantPitchMap;
+    const int pmLatency = pitchMapActive ? pitchMap.getLatencySamples() : 0;
+
+    subDelay.setDelay (pmLatency);
+    dryDelay.setDelay (pmLatency);
+
+    if (pitchMapActive)
+        pitchMap.reset();
+
+    setLatencySamples (pmLatency + limiter.getLatencySamples());
 }
 
 //==============================================================================
@@ -291,11 +347,70 @@ void ColorForgeAudioProcessor::updateParameters()
     mixSm.setTargetValue (pct (p.mix));
     gainSm.setTargetValue (juce::Decibels::decibelsToGain (val (p.outGain)));
     subSm.setTargetValue (isOn (p.subOn) ? 1.0f : 0.0f);
-    limitOn = isOn (p.limit);
+
+    // ---- Mix & master chain
+    inGainSm.setTargetValue (juce::Decibels::decibelsToGain (val (p.inGain)));
+    colorOn = isOn (p.colorOn);
+    colorSm.setTargetValue (colorOn ? 1.0f : 0.0f);
+
+    eq.setEnabled (isOn (p.eqOn));
+    for (int b = 0; b < cf::kEqBands; ++b)
+    {
+        cf::ParametricEQ::BandParams bp;
+        bp.on = isOn (p.eqBandOn[b]);
+        bp.freq = val (p.eqFreq[b]);
+        bp.gainDb = val (p.eqGain[b]);
+        bp.q = val (p.eqQ[b]);
+        bp.slope = b == 0 ? (int) val (p.eqLoSlope) : (b == cf::kEqBands - 1 ? (int) val (p.eqHiSlope) : 0);
+        eq.setBand (b, bp);
+    }
+
+    {
+        cf::Compressor::Params cp;
+        cp.on = isOn (p.cpOn);
+        cp.thresholdDb = val (p.cpThresh);
+        cp.ratio = val (p.cpRatio);
+        cp.attackMs = val (p.cpAttack);
+        cp.releaseMs = val (p.cpRelease);
+        cp.kneeDb = val (p.cpKnee);
+        cp.makeupDb = val (p.cpMakeup);
+        cp.autoMakeup = isOn (p.cpAuto);
+        cp.mix = pct (p.cpMix);
+        cp.scHpfHz = val (p.cpScHpf);
+        comp.setParams (cp);
+    }
+    {
+        cf::Saturator::Params sp;
+        sp.on = isOn (p.satOn);
+        sp.mode = (int) val (p.satMode);
+        sp.driveDb = val (p.satDrive);
+        sp.tone = pct (p.satTone);
+        sp.mix = pct (p.satMix);
+        sp.outDb = val (p.satOut);
+        sat.setParams (sp);
+    }
+    {
+        cf::StereoImager::Params ip;
+        ip.on = isOn (p.imgOn);
+        ip.width = pct (p.imgWidth);
+        ip.monoBass = isOn (p.imgMonoOn);
+        ip.monoFreq = val (p.imgMonoFreq);
+        ip.balance = pct (p.imgBalance);
+        imager.setParams (ip);
+    }
+    {
+        cf::Limiter::Params lp;
+        lp.on = isOn (p.limit);
+        lp.mode = (int) val (p.lmMode);
+        lp.gainDb = val (p.lmGain);
+        lp.ceilingDb = val (p.lmCeiling);
+        lp.releaseMs = val (p.lmRelease);
+        limiter.setParams (lp);
+    }
 }
 
 //==============================================================================
-void ColorForgeAudioProcessor::processChunk (float* l, float* r, int num)
+void ColorForgeAudioProcessor::processColorChunk (float* l, float* r, int num)
 {
     float* dryL = dryBuf[0].data();
     float* dryR = dryBuf[1].data();
@@ -347,7 +462,7 @@ void ColorForgeAudioProcessor::processChunk (float* l, float* r, int num)
         {
             case 0:  resonator.process (l, r, num); break;
             case 1:  shifter.process (l, r, num);   break;
-            default: pitchMap.process (l, r, num);  break;
+            default: if (pitchMapActive) pitchMap.process (l, r, num); break;
         }
     }
 
@@ -368,11 +483,9 @@ void ColorForgeAudioProcessor::processChunk (float* l, float* r, int num)
 
     ott.process (l, r, num);
 
-    // ---- Width, sub re-add, global mix, output
+    // ---- Width, sub re-add, colour mix
     subDelay.process (subL, subR, num);
     dryDelay.process (dryL, dryR, num);
-
-    int w = scopeWrite.load (std::memory_order_relaxed);
 
     for (int i = 0; i < num; ++i)
     {
@@ -382,28 +495,54 @@ void ColorForgeAudioProcessor::processChunk (float* l, float* r, int num)
         const float wetL = mid + side + subL[i];
         const float wetR = mid - side + subR[i];
 
-        const float m = mixSm.getNextValue();
+        const float m = mixSm.getNextValue() * colorSm.getNextValue();
+        l[i] = dryL[i] + (wetL - dryL[i]) * m;
+        r[i] = dryR[i] + (wetR - dryR[i]) * m;
+    }
+}
+
+void ColorForgeAudioProcessor::processChunk (float* l, float* r, int num)
+{
+    // ---- Input gain
+    for (int i = 0; i < num; ++i)
+    {
+        const float g = inGainSm.getNextValue();
+        l[i] *= g;
+        r[i] *= g;
+    }
+
+    // ---- Colour FX (the original ColorForge chain), skipped entirely while off
+    if (colorSm.isSmoothing() || colorOn)
+        processColorChunk (l, r, num);
+
+    // ---- Mix & master chain
+    eq.process (l, r, num);
+    comp.process (l, r, num);
+    sat.process (l, r, num);
+    imager.process (l, r, num);
+
+    for (int i = 0; i < num; ++i)
+    {
         const float g = gainSm.getNextValue();
-        float outL = (dryL[i] + (wetL - dryL[i]) * m) * g;
-        float outR = (dryR[i] + (wetR - dryR[i]) * m) * g;
+        l[i] *= g;
+        r[i] *= g;
+    }
 
-        if (limitOn)
-        {
-            outL = softClip (outL);
-            outR = softClip (outR);
-        }
+    limiter.process (l, r, num);
 
-        if (! std::isfinite (outL)) outL = 0.0f;
-        if (! std::isfinite (outR)) outR = 0.0f;
+    int w = scopeWrite.load (std::memory_order_relaxed);
 
-        l[i] = outL;
-        r[i] = outR;
+    for (int i = 0; i < num; ++i)
+    {
+        if (! std::isfinite (l[i])) l[i] = 0.0f;
+        if (! std::isfinite (r[i])) r[i] = 0.0f;
 
-        scope[(size_t) w] = 0.5f * (outL + outR);
+        scope[(size_t) w] = 0.5f * (l[i] + r[i]);
         w = (w + 1) & (kScopeSize - 1);
     }
 
     scopeWrite.store (w, std::memory_order_relaxed);
+    meter.process (l, r, num);
 }
 
 void ColorForgeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -433,6 +572,7 @@ void ColorForgeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         return;
 
     updateParameters();
+    updateLatency (false);
 
     float* l = buffer.getWritePointer (0);
     float* r = buffer.getWritePointer (1);

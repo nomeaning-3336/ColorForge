@@ -80,3 +80,18 @@ target_link_libraries(ColorForgePlayer
         juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags)
+
+# Offline DSP checks (not part of make.bat). Build with: cmake --build <dir> --target ColorForgeTests
+juce_add_console_app(ColorForgeTests PRODUCT_NAME "ColorForge Tests")
+target_sources(ColorForgeTests PRIVATE Tests/DspTests.cpp ${CF_SOURCES})
+target_include_directories(ColorForgeTests PRIVATE Source)
+target_compile_definitions(ColorForgeTests PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_DISPLAY_SPLASH_SCREEN=0)
+target_link_libraries(ColorForgeTests
+    PRIVATE
+        juce::juce_audio_processors
+        juce::juce_dsp
+    PUBLIC
+        juce::juce_recommended_config_flags)

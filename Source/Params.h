@@ -61,6 +61,26 @@ inline constexpr ChordDef kChords[] =
 };
 inline constexpr int kNumChords = (int) (sizeof (kChords) / sizeof (kChords[0]));
 
+inline constexpr int kEqBands = 8;
+
+/** "eq<band+1><suffix>", e.g. eqId (0, "Freq") == "eq1Freq". */
+inline juce::String eqId (int band, const char* suffix)
+{
+    return "eq" + juce::String (band + 1) + suffix;
+}
+
+/** Loudness targets for the "quest" readout (LUFS integrated). */
+struct LoudnessTarget { const char* name; float lufs; };
+inline constexpr LoudnessTarget kLoudnessTargets[] =
+{
+    { "CLUB  -8",      -8.0f },
+    { "LOUD  -10",    -10.0f },
+    { "STREAM -14",   -14.0f },
+    { "PODCAST -16",  -16.0f },
+    { "BROADCAST -23", -23.0f }
+};
+inline constexpr int kNumLoudnessTargets = (int) (sizeof (kLoudnessTargets) / sizeof (kLoudnessTargets[0]));
+
 //==============================================================================
 // Parameter IDs (all version 1):
 //   Global    : root scale chord midiFollow routing drive subOn subFreq width mix outGain limit
@@ -70,31 +90,39 @@ inline constexpr int kNumChords = (int) (sizeof (kChords) / sizeof (kChords[0]))
 //   Chorus    : chOn chRate chDepth chMix
 //   Reverb    : rvOn rvSize rvDamp rvMix rvFreeze
 //   OTT       : ottOn ottDepth ottTime ottUp ottDown ottLow ottMid ottHigh
+// Version 2 (mix & master suite):
+//   Global    : inGain colorOn
+//   EQ        : eqOn, eq1..eq8 On/Freq/Gain/Q, eq1Slope eq8Slope
+//   Compressor: cpOn cpThresh cpRatio cpAttack cpRelease cpKnee cpMakeup cpAuto cpMix cpScHpf
+//   Saturator : satOn satMode satDrive satTone satMix satOut
+//   Stereo    : imgOn imgWidth imgMonoOn imgMonoFreq imgBalance
+//   Limiter   : limit (v1) lmMode lmGain lmCeiling lmRelease
 inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
     using namespace juce;
     AudioProcessorValueTreeState::ParameterLayout layout;
+    int ver = 1;   // parameters added in 2.0 use version 2
 
-    auto addFloat = [&layout] (const char* pid, const char* name, NormalisableRange<float> range, float def, const char* unit)
+    auto addFloat = [&layout, &ver] (const char* pid, const char* name, NormalisableRange<float> range, float def, const char* unit)
     {
-        layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid, 1 }, name, range, def,
+        layout.add (std::make_unique<AudioParameterFloat> (ParameterID { pid, ver }, name, range, def,
                                                            AudioParameterFloatAttributes().withLabel (unit)));
     };
     auto addPct = [&addFloat] (const char* pid, const char* name, float def)
     {
         addFloat (pid, name, NormalisableRange<float> (0.0f, 100.0f, 0.1f), def, "%");
     };
-    auto addBool = [&layout] (const char* pid, const char* name, bool def)
+    auto addBool = [&layout, &ver] (const char* pid, const char* name, bool def)
     {
-        layout.add (std::make_unique<AudioParameterBool> (ParameterID { pid, 1 }, name, def));
+        layout.add (std::make_unique<AudioParameterBool> (ParameterID { pid, ver }, name, def));
     };
-    auto addChoice = [&layout] (const char* pid, const char* name, const StringArray& choices, int def)
+    auto addChoice = [&layout, &ver] (const char* pid, const char* name, const StringArray& choices, int def)
     {
-        layout.add (std::make_unique<AudioParameterChoice> (ParameterID { pid, 1 }, name, choices, def));
+        layout.add (std::make_unique<AudioParameterChoice> (ParameterID { pid, ver }, name, choices, def));
     };
-    auto addInt = [&layout] (const char* pid, const char* name, int lo, int hi, int def)
+    auto addInt = [&layout, &ver] (const char* pid, const char* name, int lo, int hi, int def)
     {
-        layout.add (std::make_unique<AudioParameterInt> (ParameterID { pid, 1 }, name, lo, hi, def));
+        layout.add (std::make_unique<AudioParameterInt> (ParameterID { pid, ver }, name, lo, hi, def));
     };
     auto skewed = [] (float lo, float hi, float step, float centre)
     {
@@ -114,13 +142,13 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     addBool   ("midiFollow", "MIDI Follow", false);
     addChoice ("routing", "Routing", { "Res > Shift > Map", "Res > Map > Shift", "Shift > Res > Map",
                                        "Shift > Map > Res", "Map > Res > Shift", "Map > Shift > Res" }, 0);
-    addPct    ("drive", "Drive", 20.0f);
+    addPct    ("drive", "Color Drive", 20.0f);
     addBool   ("subOn", "Sub Keep", true);
     addFloat  ("subFreq", "Sub Freq", skewed (30.0f, 300.0f, 1.0f, 100.0f), 90.0f, "Hz");
-    addFloat  ("width", "Width", NormalisableRange<float> (0.0f, 200.0f, 0.1f), 130.0f, "%");
-    addPct    ("mix", "Mix", 100.0f);
+    addFloat  ("width", "Color Width", NormalisableRange<float> (0.0f, 200.0f, 0.1f), 130.0f, "%");
+    addPct    ("mix", "Color Mix", 100.0f);
     addFloat  ("outGain", "Output", NormalisableRange<float> (-24.0f, 12.0f, 0.1f), 0.0f, "dB");
-    addBool   ("limit", "Limiter", true);
+    addBool   ("limit", "Limiter On", true);
 
     // ---- Spectral pitch map
     addBool   ("pmOn", "Pitch Map On", true);
@@ -171,6 +199,71 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     addFloat  ("ottLow", "OTT Low", NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, "dB");
     addFloat  ("ottMid", "OTT Mid", NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, "dB");
     addFloat  ("ottHigh", "OTT High", NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, "dB");
+
+    // =========================================================================
+    // Version 2: mixing & mastering suite
+    ver = 2;
+
+    addFloat  ("inGain", "Input", NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, "dB");
+    addBool   ("colorOn", "Color FX On", false);
+
+    // ---- Parametric EQ
+    addBool   ("eqOn", "EQ On", true);
+    {
+        static const char* names[kEqBands] = { "Low Cut", "Low Shelf", "Bell 1", "Bell 2",
+                                               "Bell 3", "Bell 4", "High Shelf", "High Cut" };
+        static const float freqs[kEqBands] = { 30.0f, 100.0f, 250.0f, 800.0f, 2500.0f, 6000.0f, 10000.0f, 18000.0f };
+        static const float qs[kEqBands]    = { 0.707f, 0.707f, 1.0f, 1.0f, 1.0f, 1.0f, 0.707f, 0.707f };
+
+        for (int b = 0; b < kEqBands; ++b)
+        {
+            const String pre = "eq" + String (b + 1);
+            const String nm = String ("EQ ") + names[b];
+            const bool isCut = (b == 0 || b == kEqBands - 1);
+
+            addBool  (eqId (b, "On").toRawUTF8(), (nm + " On").toRawUTF8(), ! isCut);
+            addFloat (eqId (b, "Freq").toRawUTF8(), (nm + " Freq").toRawUTF8(), skewed (20.0f, 20000.0f, 0.1f, 1000.0f), freqs[b], "Hz");
+            addFloat (eqId (b, "Gain").toRawUTF8(), (nm + " Gain").toRawUTF8(), NormalisableRange<float> (-24.0f, 24.0f, 0.01f), 0.0f, "dB");
+            addFloat (eqId (b, "Q").toRawUTF8(), (nm + " Q").toRawUTF8(), skewed (0.1f, 18.0f, 0.001f, 1.0f), qs[b], "");
+
+            if (isCut)
+                addChoice (eqId (b, "Slope").toRawUTF8(), (nm + " Slope").toRawUTF8(),
+                           { "12 dB/oct", "24 dB/oct", "36 dB/oct", "48 dB/oct" }, 1);
+        }
+    }
+
+    // ---- Compressor
+    addBool   ("cpOn", "Comp On", false);
+    addFloat  ("cpThresh", "Comp Threshold", NormalisableRange<float> (-60.0f, 0.0f, 0.1f), -18.0f, "dB");
+    addFloat  ("cpRatio", "Comp Ratio", skewed (1.0f, 20.0f, 0.01f, 4.0f), 2.0f, ":1");
+    addFloat  ("cpAttack", "Comp Attack", skewed (0.1f, 100.0f, 0.01f, 10.0f), 10.0f, "ms");
+    addFloat  ("cpRelease", "Comp Release", skewed (10.0f, 2000.0f, 0.1f, 200.0f), 150.0f, "ms");
+    addFloat  ("cpKnee", "Comp Knee", NormalisableRange<float> (0.0f, 24.0f, 0.1f), 6.0f, "dB");
+    addFloat  ("cpMakeup", "Comp Makeup", NormalisableRange<float> (-12.0f, 24.0f, 0.1f), 0.0f, "dB");
+    addBool   ("cpAuto", "Comp Auto Makeup", true);
+    addPct    ("cpMix", "Comp Mix", 100.0f);
+    addFloat  ("cpScHpf", "Comp SC HPF", skewed (20.0f, 500.0f, 1.0f, 100.0f), 20.0f, "Hz");
+
+    // ---- Saturator
+    addBool   ("satOn", "Sat On", false);
+    addChoice ("satMode", "Sat Mode", { "Tape", "Tube", "Clip" }, 0);
+    addFloat  ("satDrive", "Sat Drive", NormalisableRange<float> (0.0f, 36.0f, 0.1f), 6.0f, "dB");
+    addFloat  ("satTone", "Sat Tone", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%");
+    addPct    ("satMix", "Sat Mix", 100.0f);
+    addFloat  ("satOut", "Sat Output", NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, "dB");
+
+    // ---- Stereo
+    addBool   ("imgOn", "Stereo On", true);
+    addFloat  ("imgWidth", "Stereo Width", NormalisableRange<float> (0.0f, 200.0f, 0.1f), 100.0f, "%");
+    addBool   ("imgMonoOn", "Mono Bass", false);
+    addFloat  ("imgMonoFreq", "Mono Bass Freq", skewed (20.0f, 500.0f, 1.0f, 120.0f), 120.0f, "Hz");
+    addFloat  ("imgBalance", "Balance", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%");
+
+    // ---- Limiter (on/off is the v1 "limit" parameter)
+    addChoice ("lmMode", "Limiter Mode", { "Clean", "Clip" }, 0);
+    addFloat  ("lmGain", "Limiter Gain", NormalisableRange<float> (0.0f, 24.0f, 0.1f), 0.0f, "dB");
+    addFloat  ("lmCeiling", "Limiter Ceiling", NormalisableRange<float> (-12.0f, 0.0f, 0.1f), -1.0f, "dBTP");
+    addFloat  ("lmRelease", "Limiter Release", skewed (1.0f, 1000.0f, 0.1f, 100.0f), 100.0f, "ms");
 
     return layout;
 }
