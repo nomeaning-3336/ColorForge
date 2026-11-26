@@ -50,6 +50,20 @@ public:
         tgt[6] = clampf (highGainDb, -12.0, 12.0);
     }
 
+    /** Crossover frequencies (low/mid, mid/high) and solo: -1 = none, 0..2 = only that band. */
+    void setBands (float lowMidHz, float midHighHz, int soloBand)
+    {
+        const double f1 = clampf (lowMidHz, 30.0, 1000.0);
+        const double f2 = std::max (f1 * 2.0, clampf (midHighHz, 500.0, 0.45 * fs));
+        if (f1 != xf1 || f2 != xf2)
+        {
+            xf1 = f1;
+            xf2 = f2;
+            designFilters();
+        }
+        solo = soloBand < 0 || soloBand > 2 ? -1 : soloBand;
+    }
+
     void process (float* left, float* right, int numSamples)
     {
         if (left == nullptr || right == nullptr || numSamples <= 0)
@@ -131,8 +145,9 @@ public:
                 else g = target + gainCoef * (g - target);
                 gLin[b] = g;
 
-                outL += band[b][0] * g;
-                outR += band[b][1] * g;
+                const double sg = (solo < 0 || solo == b) ? g : 0.0;
+                outL += band[b][0] * sg;
+                outR += band[b][1] * sg;
             }
 
             if (! std::isfinite (outL) || ! std::isfinite (outR))
@@ -229,12 +244,12 @@ private:
         {
             for (int i = 0; i < 2; ++i)
             {
-                lp1[ch][i].design (Biquad::LP, kF1, fs);
-                hp1[ch][i].design (Biquad::HP, kF1, fs);
-                lp2[ch][i].design (Biquad::LP, kF2, fs);
-                hp2[ch][i].design (Biquad::HP, kF2, fs);
+                lp1[ch][i].design (Biquad::LP, xf1, fs);
+                hp1[ch][i].design (Biquad::HP, xf1, fs);
+                lp2[ch][i].design (Biquad::LP, xf2, fs);
+                hp2[ch][i].design (Biquad::HP, xf2, fs);
             }
-            ap2[ch].design (Biquad::AP, kF2, fs);
+            ap2[ch].design (Biquad::AP, xf2, fs);
         }
     }
 
@@ -258,6 +273,8 @@ private:
     }
 
     double fs = 48000.0;
+    double xf1 = kF1, xf2 = kF2;
+    int solo = -1;
     double paramCoef = 0.0, gainCoef = 0.0;
 
     Biquad lp1[2][2], hp1[2][2], lp2[2][2], hp2[2][2], ap2[2];

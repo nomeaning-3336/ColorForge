@@ -748,6 +748,7 @@ void EqGraph::resized()
 {
     plot = getLocalBounds().toFloat().reduced (10.0f).withTrimmedLeft (22.0f).withTrimmedBottom (12.0f);
     curveDb.assign ((size_t) juce::jmax (1, (int) (plot.getWidth() / U)), 0.0f);
+    liveDb = curveDb;
 }
 
 float EqGraph::xForFreq (float f) const noexcept
@@ -819,15 +820,35 @@ void EqGraph::update()
     }
 
     const bool eqOn = paramValue ("eqOn") > 0.5f;
+
+    // dynamic bands: the live curve uses the gain the detector is applying right now
+    auto liveDesigns = designs;
+    std::array<bool, cf::kEqBands> dyn {};
+    anyDynamic = false;
+    for (int b = 1; b < cf::kEqBands - 1; ++b)
+        if (on[(size_t) b] && paramValue (cf::eqId (b, "Dyn")) > 0.5f)
+        {
+            dyn[(size_t) b] = anyDynamic = true;
+            liveDesigns[(size_t) b] = cf::ParametricEQ::design (cf::ParametricEQ::typeOfBand (b),
+                                                                paramValue (cf::eqId (b, "Freq")),
+                                                                processor.getEqAppliedGainDb (b),
+                                                                paramValue (cf::eqId (b, "Q")), 0, sr);
+        }
+    anyDynamic = anyDynamic && eqOn;
+
     for (size_t i = 0; i < curveDb.size(); ++i)
     {
         const float f = freqForX (plot.getX() + ((float) i + 0.5f) * U);
-        double mag = 1.0;
+        double mag = 1.0, live = 1.0;
         if (eqOn)
             for (int b = 0; b < cf::kEqBands; ++b)
                 if (on[(size_t) b])
+                {
                     mag *= designs[(size_t) b].magnitude (f, sr);
+                    live *= (dyn[(size_t) b] ? liveDesigns : designs)[(size_t) b].magnitude (f, sr);
+                }
         curveDb[i] = (float) (20.0 * std::log10 (juce::jmax (1.0e-6, mag)));
+        liveDb[i] = (float) (20.0 * std::log10 (juce::jmax (1.0e-6, live)));
     }
 
     repaint();
@@ -902,6 +923,19 @@ void EqGraph::paint (juce::Graphics& g)
         g.fillRectList (line);
     }
 
+    // live curve for dynamic bands: a dotted white trace of what is applied right now
+    if (anyDynamic)
+    {
+        juce::RectangleList<float> dots;
+        for (size_t i = 0; i < liveDb.size(); i += 2)
+        {
+            const float y = std::floor (juce::jlimit (plot.getY(), plot.getBottom() - U, yForDb (liveDb[i])) / U) * U;
+            dots.addWithoutMerging ({ plot.getX() + (float) i * U, y, U, U });
+        }
+        g.setColour (pal::text);
+        g.fillRectList (dots);
+    }
+
     // handles
     static const char* bandNames[] = { "LOW CUT", "LOW SHELF", "BELL 1", "BELL 2", "BELL 3", "BELL 4", "HIGH SHELF", "HIGH CUT" };
     for (int b = 0; b < cf::kEqBands; ++b)
@@ -921,9 +955,21 @@ void EqGraph::paint (juce::Graphics& g)
         drawTextIn (g, juce::String (b + 1), box, juce::Justification::centred, 1.0f, on ? pal::edgeDark : c);
 
         const int mode = (int) paramValue (cf::eqId (b, "Mode"));
-        if (mode > 0)
-            drawTextIn (g, mode == 1 ? "M" : "S", box.translated (0.0f, box.getHeight() + 2.0f).withHeight (8.0f),
+        const bool isDyn = bandHasGain (b) && paramValue (cf::eqId (b, "Dyn")) > 0.5f;
+        juce::String tag = mode > 0 ? (mode == 1 ? "M" : "S") : "";
+        if (isDyn)
+            tag << "D";
+        if (tag.isNotEmpty())
+            drawTextIn (g, tag, box.translated (0.0f, box.getHeight() + 2.0f).withHeight (8.0f).expanded (6.0f, 0.0f),
                         juce::Justification::centred, 1.0f, c);
+
+        // dynamic band: a small marker at the gain applied right now
+        if (isDyn && on)
+        {
+            const float y = std::round (yForDb (processor.getEqAppliedGainDb (b)));
+            g.setColour (pal::text);
+            g.fillRect (snap ({ std::round (pos.x) - 5.0f, y - U * 0.5f, 10.0f, U }));
+        }
     }
 
     // readout for the band under the mouse
@@ -940,6 +986,8 @@ void EqGraph::paint (juce::Graphics& g)
         const int mode = (int) paramValue (cf::eqId (shown, "Mode"));
         if (mode > 0)
             txt << (mode == 1 ? "  MID" : "  SIDE");
+        if (bandHasGain (shown) && paramValue (cf::eqId (shown, "Dyn")) > 0.5f)
+            txt << "  DYN " << juce::String (paramValue (cf::eqId (shown, "DynThr")), 0) << " DB";
 
         auto box = juce::Rectangle<float> (textWidth (txt, 2.0f) + 20.0f, 26.0f).withPosition (plot.getX() + 8.0f, plot.getY() + 6.0f);
         windowFrame (g, box, U * 0.5f, pal::accent (shown), pal::panel);
@@ -1484,6 +1532,12 @@ StatusPanel::StatusPanel (ColorForgeAudioProcessor& p) : processor (p)
         zoneSeconds = 0.0;
     };
     addAndMakeVisible (resetButton);
+
+    bypassButton.getProperties().set ("pxScale", 1.5f);
+    bypassButton.setColour (juce::ToggleButton::tickColourId, pal::red);
+    bypassButton.setTooltip ("Level-matched bypass: hear the dry input at the same loudness as the processed signal");
+    bypassAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (processor.apvts, "matchBypass", bypassButton);
+    addAndMakeVisible (bypassButton);
 }
 
 float StatusPanel::targetLufs() const
@@ -1497,6 +1551,7 @@ void StatusPanel::resized()
     auto r = getLocalBounds().reduced (12);
     questArea = r.removeFromBottom (210);
     metersArea = r;
+    bypassButton.setBounds (r.removeFromTop (22).removeFromRight (100));
 
     auto q = questArea.reduced (10).withTrimmedTop (30);
     auto row = q.removeFromTop (24);
@@ -1517,6 +1572,7 @@ void StatusPanel::update()
     corr = m.correlation.load (std::memory_order_relaxed);
     compGr = processor.getCompGainReductionDb();
     limGr = processor.getLimiterGainReductionDb();
+    matchDb = processor.getBypassMatchDb();
 
     // the quest timer only runs while the short-term loudness sits in the target zone
     const auto now = juce::Time::getMillisecondCounter();
@@ -1620,6 +1676,14 @@ void StatusPanel::paint (juce::Graphics& g)
         segmentBar (g, r.removeFromTop (12.0f), U, juce::jlimit (0.0f, 1.0f, v / 12.0f),
                     pal::orange, pal::orange, pal::red, 0.5f, 0.75f);
         r.removeFromTop (8.0f);
+    }
+
+    // ---- level-matched bypass: the gain applied to the dry signal so A/B is a fair fight
+    {
+        auto row = r.removeFromTop (14.0f);
+        const bool byp = bypassButton.getToggleState();
+        label (row, byp ? "BYPASS ON" : "BYPASS MATCH", byp ? pal::red : pal::dim);
+        value (row, (matchDb >= 0.0f ? "+" : "") + juce::String (matchDb, 1) + " DB", byp ? pal::red : pal::dim, 1.5f);
     }
 
     // ---- quest
@@ -1753,10 +1817,11 @@ ColorForgeAudioProcessorEditor::ColorForgeAudioProcessorEditor (ColorForgeAudioP
     ottPanel = std::make_unique<FxPanel> (apvts, "OTT", pal::blue, "ottOn", nullptr, std::vector<ToggleSpec> {},
         std::vector<KnobSpec> { { "ottDepth", "DEPTH" }, { "ottTime", "TIME" }, { "ottUp", "UP" },
                                 { "ottDown", "DOWN" }, { "ottLow", "LOW" }, { "ottMid", "MID" },
-                                { "ottHigh", "HIGH" } }, 4);
+                                { "ottHigh", "HIGH" }, { "ottXLow", "X LOW" }, { "ottXHigh", "X HIGH" } }, 5);
+    ottPanel->addExtraCombo (apvts, "ottSolo");
     colorIoPanel = std::make_unique<FxPanel> (apvts, "COLOR IN/OUT", pal::purple, nullptr, nullptr,
         std::vector<ToggleSpec> { { "subOn", "SUB KEEP" } },
-        std::vector<KnobSpec> { { "drive", "DRIVE" }, { "subFreq", "SUB HZ" }, { "width", "WIDTH" }, { "mix", "MIX" } }, 4);
+        std::vector<KnobSpec> { { "drive", "DRIVE" }, { "subFreq", "SUB HZ" }, { "width", "WIDTH" }, { "mix", "MIX" } }, 2);
 
     for (juce::Component* c : std::initializer_list<juce::Component*> {
              colorPower.get(), midiFollow.get(), rootBox.get(), scaleBox.get(), chordBox.get(), routingBox.get(),
@@ -1778,14 +1843,24 @@ ColorForgeAudioProcessorEditor::ColorForgeAudioProcessorEditor (ColorForgeAudioP
                    q = cf::eqId (b, "Q"), slope = cf::eqId (b, "Slope");
 
         // FxPanel keeps raw pointers to the spec strings only during construction
+        const auto dyn = cf::eqId (b, "Dyn"), dynThr = cf::eqId (b, "DynThr");
         std::vector<KnobSpec> knobs { { freq.toRawUTF8(), "FREQ" } };
+        std::vector<ToggleSpec> toggles;
         if (! isCut)
+        {
             knobs.push_back ({ gain.toRawUTF8(), "GAIN" });
-        knobs.push_back ({ q.toRawUTF8(), "Q" });
+            knobs.push_back ({ q.toRawUTF8(), "Q" });
+            knobs.push_back ({ dynThr.toRawUTF8(), "THR" });
+            toggles.push_back ({ dyn.toRawUTF8(), "DYN" });
+        }
+        else
+        {
+            knobs.push_back ({ q.toRawUTF8(), "Q" });
+        }
 
         eqBands[(size_t) b] = std::make_unique<FxPanel> (apvts, bandTitles[b], pal::accent (b), on.toRawUTF8(),
                                                          isCut ? slope.toRawUTF8() : nullptr,
-                                                         std::vector<ToggleSpec> {}, knobs, 1);
+                                                         toggles, knobs, isCut ? 1 : 2);
         eqBands[(size_t) b]->addExtraCombo (apvts, cf::eqId (b, "Mode"));
         addTo (pageEq, eqBands[(size_t) b].get());
     }
@@ -1958,8 +2033,8 @@ void ColorForgeAudioProcessorEditor::resized()
         shiftPanel->setBounds (cell (0, 2, 1));
         chorusPanel->setBounds (cell (0, 3, 1));
         reverbPanel->setBounds (cell (1, 0, 1));
-        ottPanel->setBounds (cell (1, 1, 1));
-        colorIoPanel->setBounds (cell (1, 2, 2));
+        ottPanel->setBounds (cell (1, 1, 2));
+        colorIoPanel->setBounds (cell (1, 3, 1));
     }
 
     // ---- EQ

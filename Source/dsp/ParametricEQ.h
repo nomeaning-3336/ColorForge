@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 
 namespace cf {
@@ -37,7 +38,15 @@ public:
         float freq = 1000.0f, gainDb = 0.0f, q = 0.707f;
         int slope = 0;   // cut bands: 0..3 -> 12..48 dB/oct
         int mode = 0;    // 0 = stereo (L and R), 1 = mid only, 2 = side only
+        bool dynamic = false;          // bells / shelves: apply the gain only above the threshold
+        float dynThresholdDb = -30.0f; // full gain 12 dB above it
     };
+
+    /** Gain each band is applying right now (dynamic bands move), for the editor. */
+    float getAppliedGainDb (int band) const noexcept
+    {
+        return band >= 0 && band < kNumBands ? appliedGain[(size_t) band].load (std::memory_order_relaxed) : 0.0f;
+    }
 
     struct Design
     {
@@ -90,6 +99,8 @@ public:
     void prepare (double sampleRate, int chunkSize)
     {
         sr = (sampleRate > 1000.0 && std::isfinite (sampleRate)) ? sampleRate : 48000.0;
+        detAttack  = std::exp (-1.0 / (0.005 * sr));
+        detRelease = std::exp (-1.0 / (0.120 * sr));
         smoothCoef = std::exp (-(double) chunkSize / (0.03 * sr));
         reset();
     }
@@ -101,6 +112,8 @@ public:
             for (auto& ch : b.filt)
                 for (auto& f : ch)
                     f.clear();
+            b.det.clear();
+            b.env = 0.0;
             b.snap = true;
         }
         masterMix = masterTarget;
@@ -123,6 +136,39 @@ public:
 
         if (masterMix <= 0.0 && masterTarget <= 0.0)
             return;
+
+        // dynamic bands: measure the band's level over this chunk first
+        for (int bi = 0; bi < kNumBands; ++bi)
+        {
+            auto& b = bands[(size_t) bi];
+            const bool canBeDynamic = typeOfBand (bi) != Type::LowCut && typeOfBand (bi) != Type::HighCut;
+            b.dynAmount = 1.0;
+
+            if (! (canBeDynamic && b.target.dynamic && b.target.on))
+            {
+                b.env = 0.0;
+                continue;
+            }
+
+            const double f = std::fmax (20.0, (double) b.target.freq);
+            if (std::abs (f - b.detF) > 1.0e-3 * f)
+            {
+                b.det.c = biquad::bandPass (f, std::fmax (0.5, (double) b.target.q), sr);
+                b.detF = f;
+            }
+
+            for (int n = 0; n < num; ++n)
+            {
+                const double m = b.target.mode == 2 ? 0.5 * ((double) l[n] - (double) r[n])
+                                                    : 0.5 * ((double) l[n] + (double) r[n]);
+                const double v = std::abs (b.det.process (m));
+                b.env = v + (v > b.env ? detAttack : detRelease) * (b.env - v);
+            }
+            b.det.sanitise();
+
+            const double lvl = 20.0 * std::log10 (std::fmax (b.env, 1.0e-9));
+            b.dynAmount = std::clamp ((lvl - (double) b.target.dynThresholdDb) / 12.0, 0.0, 1.0);
+        }
 
         for (int bi = 0; bi < kNumBands; ++bi)
             updateBand (bi);
@@ -181,6 +227,8 @@ private:
         Design d;
         double lastF = -1.0, lastG = 1.0e9, lastQ = -1.0;
         int lastSlope = -1;
+        Biquad det;
+        double env = 0.0, detF = -1.0, dynAmount = 1.0;
         std::array<std::array<Biquad, kMaxSections>, 2> filt {};
     };
 
@@ -190,16 +238,17 @@ private:
         const auto& t = b.target;
         const double tf = std::log (std::fmax (10.0, (double) t.freq));
         const double tm = t.on ? 1.0 : 0.0;
+        const double tg = (double) t.gainDb * b.dynAmount;
 
         if (b.snap)
         {
-            b.freq = tf; b.gain = t.gainDb; b.q = t.q; b.mix = tm;
+            b.freq = tf; b.gain = tg; b.q = t.q; b.mix = tm;
             b.snap = false;
         }
         else
         {
             b.freq = tf + smoothCoef * (b.freq - tf);
-            b.gain = t.gainDb + smoothCoef * (b.gain - t.gainDb);
+            b.gain = tg + smoothCoef * (b.gain - tg);
             b.q    = t.q + smoothCoef * (b.q - t.q);
             b.mix  = tm + smoothCoef * (b.mix - tm);
             if (std::abs (b.mix - tm) < 1.0e-4)
@@ -227,9 +276,12 @@ private:
 
             b.lastF = f; b.lastG = b.gain; b.lastQ = b.q; b.lastSlope = b.slope;
         }
+
+        appliedGain[(size_t) bi].store ((float) (b.gain * b.mix), std::memory_order_relaxed);
     }
 
-    double sr = 48000.0, smoothCoef = 0.9;
+    double sr = 48000.0, smoothCoef = 0.9, detAttack = 0.99, detRelease = 0.999;
+    std::array<std::atomic<float>, kNumBands> appliedGain {};
     double masterMix = 1.0, masterTarget = 1.0;
     std::array<Band, kNumBands> bands {};
 };

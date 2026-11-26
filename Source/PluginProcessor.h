@@ -113,6 +113,9 @@ public:
     cf::LoudnessMeter meter;
     float getCompGainReductionDb() const noexcept           { return comp.grDb.load (std::memory_order_relaxed); }
     float getLimiterGainReductionDb() const noexcept        { return limiter.grDb.load (std::memory_order_relaxed); }
+    float getEqAppliedGainDb (int band) const noexcept      { return eq.getAppliedGainDb (band); }
+    /** Gain applied to the dry signal while the level-matched bypass is on (dB). */
+    float getBypassMatchDb() const noexcept                 { return bypassMatchDb.load (std::memory_order_relaxed); }
 
     /** Non-automatable UI state stored with the plugin state. */
     static constexpr const char* kLufsTargetProp = "lufsTarget";
@@ -166,6 +169,8 @@ private:
         std::atomic<float> *eqOn;
         std::atomic<float> *eqBandOn[cf::kEqBands], *eqFreq[cf::kEqBands], *eqGain[cf::kEqBands], *eqQ[cf::kEqBands];
         std::atomic<float> *eqLoSlope, *eqHiSlope, *eqMode[cf::kEqBands];
+        std::atomic<float> *eqDyn[cf::kEqBands] {}, *eqDynThr[cf::kEqBands] {};
+        std::atomic<float> *matchBypass, *ottXLow, *ottXHigh, *ottSolo;
         std::atomic<float> *cpOn, *cpThresh, *cpRatio, *cpAttack, *cpRelease, *cpKnee, *cpMakeup, *cpAuto, *cpMix, *cpScHpf;
         std::atomic<float> *satOn, *satMode, *satDrive, *satTone, *satMix, *satOut;
         std::atomic<float> *imgOn, *imgWidth, *imgMonoOn, *imgMonoFreq, *imgBalance;
@@ -193,7 +198,20 @@ private:
     juce::dsp::Chorus<float> chorus;
     juce::dsp::LinkwitzRileyFilter<float> crossover;
     juce::Reverb reverb;
-    StereoDelay subDelay, dryDelay;
+    StereoDelay subDelay, dryDelay, bypassDelay;
+
+    /** K-weighted energy with a ~1 s average, for level matching. */
+    struct LevelTracker
+    {
+        void prepare (double sampleRate);
+        void process (const float* l, const float* r, int num) noexcept;
+        double energy = 0.0, coef = 0.9999;
+        cf::Biquad kw[2][2];
+    };
+    LevelTracker inLevel, wetLevel;
+    std::array<float, kChunk> rawBuf[2] {};
+    juce::SmoothedValue<float> bypassSm, bypassGainSm;
+    std::atomic<float> bypassMatchDb { 0.0f };
 
     cf::ParametricEQ eq;
     cf::Compressor comp;

@@ -99,6 +99,9 @@ inline constexpr int kNumLoudnessTargets = (int) (sizeof (kLoudnessTargets) / si
 //   Limiter   : limit (v1) lmMode lmGain lmCeiling lmRelease
 // Version 3:
 //   EQ        : eq1Mode..eq8Mode (Stereo / Mid / Side)
+// Version 4:
+//   EQ        : eq2..eq7 Dyn / DynThr (dynamic bells and shelves)
+//   Global    : matchBypass        OTT: ottXLow ottXHigh ottSolo
 inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
     using namespace juce;
@@ -277,6 +280,24 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
             addChoice (eqId (b, "Mode").toRawUTF8(), (String ("EQ ") + names[b] + " Mode").toRawUTF8(),
                        { "Stereo", "Mid", "Side" }, 0);
     }
+
+    // =========================================================================
+    // Version 4: dynamic EQ, level-matched bypass, multiband OTT
+    ver = 4;
+    {
+        static const char* names[kEqBands] = { "Low Cut", "Low Shelf", "Bell 1", "Bell 2",
+                                               "Bell 3", "Bell 4", "High Shelf", "High Cut" };
+        for (int b = 1; b < kEqBands - 1; ++b)
+        {
+            addBool  (eqId (b, "Dyn").toRawUTF8(), (String ("EQ ") + names[b] + " Dynamic").toRawUTF8(), false);
+            addFloat (eqId (b, "DynThr").toRawUTF8(), (String ("EQ ") + names[b] + " Dyn Threshold").toRawUTF8(),
+                      NormalisableRange<float> (-60.0f, 0.0f, 0.1f), -30.0f, "dB");
+        }
+    }
+    addBool   ("matchBypass", "Bypass (Level Matched)", false);
+    addFloat  ("ottXLow", "OTT Low/Mid Split", skewed (40.0f, 500.0f, 1.0f, 120.0f), 88.0f, "Hz");
+    addFloat  ("ottXHigh", "OTT Mid/High Split", skewed (1000.0f, 10000.0f, 1.0f, 2500.0f), 2500.0f, "Hz");
+    addChoice ("ottSolo", "OTT Solo", { "Solo Off", "Solo Low", "Solo Mid", "Solo High" }, 0);
 
     return layout;
 }

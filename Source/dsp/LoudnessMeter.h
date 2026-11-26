@@ -101,6 +101,9 @@ public:
                            std::memory_order_relaxed);
     }
 
+    /** The two K-weighting stages (0 = shelf, 1 = high-pass) for the prepared sample rate. */
+    BiquadCoefs kWeightingStage (int stage) const noexcept   { return kw[0][stage == 0 ? 0 : 1].c; }
+
     static float lufsFromEnergy (double e) noexcept
     {
         return e > 1.0e-12 ? (float) (-0.691 + 10.0 * std::log10 (e)) : kFloor - 10.0f;

@@ -41,12 +41,14 @@ Each phase ships as its own pull request and keeps the MinGW build working.
 - **No pitch-map latency when the pitch map is off** (it currently adds about 85 ms even when off).
 - **8-bit game UI**: pixel font, pixel knobs and switches, a limited palette, tabbed "worlds" (COLOR, EQ, DYNAMICS, MASTER), HP-bar style meters and a loudness-target "quest" readout.
 
-### Phase 2: workflow
+### Phase 2: workflow (done, PRs #2 and #3)
 - Done: factory presets (mix bus, master, vocal, drums, color bass) and user presets on disk.
 - Done: A/B snapshots.
 - Done: reorderable module chain (EQ, compressor, saturator, stereo).
 - Done: mid/side mode per EQ band.
-- Next: dynamic EQ bands, gain-matched bypass, multiband controls on the existing OTT (movable crossovers, solo).
+- Done: dynamic EQ bands (shelves and bells).
+- Done: level-matched bypass.
+- Done: movable crossovers and band solo on the OTT.
 
 ### Phase 3: modulation & automation in the standalone program
 - Two LFOs and an envelope follower, each assignable to any parameter, with tempo sync in the plugin.
