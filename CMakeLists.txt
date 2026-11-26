@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(ColorForge VERSION 1.0.0 LANGUAGES C CXX)
+project(ColorForge VERSION 2.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,7 +29,7 @@ juce_add_plugin(ColorForge
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     COPY_PLUGIN_AFTER_BUILD FALSE
     VST3_AUTO_MANIFEST ${CF_AUTO_MANIFEST}
-    VST3_CATEGORIES Fx Filter Modulation)
+    VST3_CATEGORIES Fx Mastering Dynamics EQ)
 
 # Processor + editor sources, shared by the plugin and the standalone player.
 file(GLOB CF_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Source/*.cpp")
@@ -58,7 +58,7 @@ target_link_libraries(ColorForge
 juce_add_gui_app(ColorForgePlayer
     PRODUCT_NAME "ColorForge Player"
     COMPANY_NAME "ColorForge Audio"
-    VERSION 1.0.0)
+    VERSION 2.0.0)
 
 target_sources(ColorForgePlayer PRIVATE Player/PlayerMain.cpp ${CF_SOURCES})
 target_include_directories(ColorForgePlayer PRIVATE Source)
@@ -77,6 +77,22 @@ target_compile_definitions(ColorForgePlayer PRIVATE
 target_link_libraries(ColorForgePlayer
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_dsp
+    PUBLIC
+        juce::juce_recommended_config_flags)
+
+# Offline DSP checks (not part of make.bat). Build with: cmake --build <dir> --target ColorForgeTests
+juce_add_console_app(ColorForgeTests PRODUCT_NAME "ColorForge Tests")
+target_sources(ColorForgeTests PRIVATE Tests/DspTests.cpp ${CF_SOURCES})
+target_include_directories(ColorForgeTests PRIVATE Source)
+target_compile_definitions(ColorForgeTests PRIVATE
+    JUCE_MODAL_LOOPS_PERMITTED=1
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_DISPLAY_SPLASH_SCREEN=0)
+target_link_libraries(ColorForgeTests
+    PRIVATE
+        juce::juce_audio_processors
         juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags)

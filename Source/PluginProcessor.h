@@ -13,6 +13,12 @@
 #include "dsp/ResonatorBank.h"
 #include "dsp/SpectralPitchMap.h"
 #include "dsp/OTT.h"
+#include "dsp/ParametricEQ.h"
+#include "dsp/Compressor.h"
+#include "dsp/Saturator.h"
+#include "dsp/StereoImager.h"
+#include "dsp/Limiter.h"
+#include "dsp/LoudnessMeter.h"
 
 //==============================================================================
 // The editor is written against the JUCE 8 font API. When building with JUCE 7
@@ -101,13 +107,22 @@ public:
     void getScopeSnapshot (float* dest, int numSamples) const noexcept;
     double getScopeSampleRate() const noexcept              { return scopeSampleRate.load(); }
 
+    /** Output loudness / peak / correlation meters (post limiter). */
+    cf::LoudnessMeter meter;
+    float getCompGainReductionDb() const noexcept           { return comp.grDb.load (std::memory_order_relaxed); }
+    float getLimiterGainReductionDb() const noexcept        { return limiter.grDb.load (std::memory_order_relaxed); }
+
+    /** Non-automatable UI state stored with the plugin state. */
+    static constexpr const char* kLufsTargetProp = "lufsTarget";
+
 private:
     static constexpr int kChunk = 128;          // control-rate granularity
     static constexpr int kScopeSize = 16384;    // power of two
 
     struct StereoDelay
     {
-        void prepare (int delaySamples);
+        void prepare (int maxDelaySamples);          // allocates; message thread / prepareToPlay
+        void setDelay (int delaySamples) noexcept;   // clears; real-time safe
         void process (float* l, float* r, int num) noexcept;
 
         std::vector<float> buf[2];
@@ -123,10 +138,22 @@ private:
         std::atomic<float> *chOn, *chRate, *chDepth, *chMix;
         std::atomic<float> *rvOn, *rvSize, *rvDamp, *rvMix, *rvFreeze;
         std::atomic<float> *ottOn, *ottDepth, *ottTime, *ottUp, *ottDown, *ottLow, *ottMid, *ottHigh;
+
+        // v2
+        std::atomic<float> *inGain, *colorOn;
+        std::atomic<float> *eqOn;
+        std::atomic<float> *eqBandOn[cf::kEqBands], *eqFreq[cf::kEqBands], *eqGain[cf::kEqBands], *eqQ[cf::kEqBands];
+        std::atomic<float> *eqLoSlope, *eqHiSlope;
+        std::atomic<float> *cpOn, *cpThresh, *cpRatio, *cpAttack, *cpRelease, *cpKnee, *cpMakeup, *cpAuto, *cpMix, *cpScHpf;
+        std::atomic<float> *satOn, *satMode, *satDrive, *satTone, *satMix, *satOut;
+        std::atomic<float> *imgOn, *imgWidth, *imgMonoOn, *imgMonoFreq, *imgBalance;
+        std::atomic<float> *lmMode, *lmGain, *lmCeiling, *lmRelease;
     };
 
     void updateParameters();
+    void updateLatency (bool force);
     void processChunk (float* l, float* r, int num);
+    void processColorChunk (float* l, float* r, int num);
 
     ParamRefs p {};
     double sr = 48000.0;
@@ -141,7 +168,13 @@ private:
     juce::Reverb reverb;
     StereoDelay subDelay, dryDelay;
 
-    juce::SmoothedValue<float> driveSm, widthSm, mixSm, gainSm, subSm;
+    cf::ParametricEQ eq;
+    cf::Compressor comp;
+    cf::Saturator sat;
+    cf::StereoImager imager;
+    cf::Limiter limiter;
+
+    juce::SmoothedValue<float> driveSm, widthSm, mixSm, gainSm, subSm, inGainSm, colorSm;
     std::array<float, kChunk> dryBuf[2] {}, subBuf[2] {};
 
     // Block state
@@ -150,7 +183,8 @@ private:
     float fsShiftHz = 0.0f, fsSpreadHz = 0.0f, fsFeedback = 0.0f, fsMix = 0.0f, lfoRateHz = 0.25f, lfoDepthHz = 0.0f;
     double lfoPhase = 0.0;
     float lastSubFreq = -1.0f;
-    bool reverbOn = true, reverbWasOn = true, limitOn = true;
+    bool reverbOn = true, reverbWasOn = true;
+    bool colorOn = false, pitchMapActive = false;   // pitch map latency only while it is in use
 
     // Scope
     std::array<float, kScopeSize> scope {};

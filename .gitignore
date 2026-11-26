@@ -7,3 +7,4 @@
 /build-mingw/
 /dist/
 *.log
+/build-*/
