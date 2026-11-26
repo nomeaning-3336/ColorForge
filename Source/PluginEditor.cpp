@@ -180,6 +180,19 @@ void PixelLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int wi
     const juce::Point<float> tip { centre.x + (bodyR - 2 * U) * std::sin (angle), centre.y - (bodyR - 2 * U) * std::cos (angle) };
     const juce::Point<float> base { centre.x + bodyR * 0.25f * std::sin (angle), centre.y - bodyR * 0.25f * std::cos (angle) };
     pixelLine (g, base, tip, U, 2 * U, enabled ? accent.brighter (0.3f) : pal::dim);
+
+    // modulation: a white pip where the modulated value sits right now
+    const float modOffset = (float) slider.getProperties().getWithDefault ("modOffset", 0.0f);
+    if (std::abs (modOffset) > 1.0e-3f)
+    {
+        const float a = startAngle + juce::jlimit (0.0f, 1.0f, sliderPos + modOffset) * (endAngle - startAngle);
+        const float px = std::round ((centre.x + pipR * std::sin (a)) / U) * U;
+        const float py = std::round ((centre.y - pipR * std::cos (a)) / U) * U;
+        g.setColour (pal::edgeDark);
+        g.fillRect (px - 2 * U, py - 2 * U, 4 * U, 4 * U);
+        g.setColour (pal::text);
+        g.fillRect (px - U - U * 0.5f, py - U - U * 0.5f, 3 * U, 3 * U);
+    }
 }
 
 void PixelLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleButton& b, bool highlighted, bool down)
@@ -233,8 +246,13 @@ void PixelLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int wi
     auto r = juce::Rectangle<int> (x, y, width, height).toFloat();
     auto track = r.withSizeKeepingCentre (r.getWidth(), 4 * U);
     bevel (g, track, U, pal::bgAlt, true);
-    g.setColour (pal::cyan);
-    g.fillRect (snap (track.reduced (U).withRight (sliderPos)));
+    const auto fill = slider.isColourSpecified (juce::Slider::trackColourId) ? slider.findColour (juce::Slider::trackColourId) : pal::cyan;
+    auto inner = track.reduced (U);
+    float from = inner.getX();
+    if (slider.getMinimum() < 0.0 && slider.getMaximum() > 0.0)   // bipolar: fill from zero
+        from = std::round ((float) x + (float) slider.valueToProportionOfLength (0.0) * (float) width);
+    g.setColour (fill);
+    g.fillRect (snap (inner.withLeft (juce::jmin (from, sliderPos)).withRight (juce::jmax (from, sliderPos))));
 
     auto thumb = juce::Rectangle<float> (5 * U, 8 * U).withCentre ({ std::round (sliderPos), r.getCentreY() });
     bevel (g, thumb, U, slider.isMouseOverOrDragging() ? pal::edgeLight : pal::dim, false);
@@ -394,6 +412,28 @@ Knob::Knob (juce::AudioProcessorValueTreeState& apvts, juce::RangedAudioParamete
     slider.updateText();
 
     slider.setDoubleClickReturnValue (true, (double) param.convertFrom0to1 (param.getDefaultValue()));
+
+    // knobs that the mod matrix can reach show the modulated position as a white pip
+    modTarget = ColorForgeAudioProcessor::modTargetIndex (paramID);
+    processor = dynamic_cast<const ColorForgeAudioProcessor*> (&apvts.processor);
+    if (modTarget > 0 && processor != nullptr)
+        startTimerHz (30);
+}
+
+Knob::~Knob()
+{
+    stopTimer();
+}
+
+void Knob::timerCallback()
+{
+    const float m = processor->getModOffset (modTarget);
+    if (std::abs (m - shownMod) > 1.0e-3f)
+    {
+        shownMod = m;
+        slider.getProperties().set ("modOffset", m);
+        slider.repaint();
+    }
 }
 
 void Knob::resized()
@@ -1744,6 +1784,170 @@ void StatusPanel::paint (juce::Graphics& g)
 
     drawTextIn (g, msg, qi.removeFromTop (22.0f), juce::Justification::centred, 2.0f, msgColour, true);
 }
+//==============================================================================
+LfoScope::LfoScope (ColorForgeAudioProcessor& p, int lfoIndex, juce::Colour c)
+    : processor (p), index (lfoIndex), colour (c)
+{
+}
+
+void LfoScope::paint (juce::Graphics& g)
+{
+    screen (g, getLocalBounds().toFloat());
+    auto plot = getLocalBounds().toFloat().reduced (8.0f, 10.0f);
+    const juce::String id ("lfo" + juce::String (index + 1));
+    const int shape = (int) processor.apvts.getRawParameterValue (id + "Shape")->load();
+    const bool sync = processor.apvts.getRawParameterValue (id + "Sync")->load() > 0.5f;
+
+    dottedHLine (g, plot.getCentreY(), plot.getX(), plot.getRight(), pal::edgeMid.withAlpha (0.6f));
+
+    // one cycle of the shape (the random shape is drawn as fixed steps)
+    juce::RectangleList<float> line;
+    const int cols = (int) (plot.getWidth() / U);
+    float prevY = -1.0f;
+    for (int c = 0; c < cols; ++c)
+    {
+        const double ph = (double) c / (double) juce::jmax (1, cols - 1);
+        const double v = shape == cf::ModEngine::random ? std::sin ((double) ((int) (ph * 8.0) * 7 % 11) * 1.7)
+                                                        : cf::ModEngine::shapeValue (shape, ph, 0.0);
+        const float y = std::floor (juce::jmap ((float) v, -1.0f, 1.0f, plot.getBottom() - U, plot.getY()) / U) * U;
+        const float a = prevY < 0.0f ? y : juce::jmin (prevY, y), b = prevY < 0.0f ? y : juce::jmax (prevY, y);
+        line.addWithoutMerging ({ plot.getX() + (float) c * U, a, U, b - a + U });
+        prevY = y;
+    }
+    g.setColour (colour.withAlpha (0.8f));
+    g.fillRectList (line);
+
+    // current phase and value
+    const double ph = processor.getLfoPhase (index);
+    const float v = processor.getModSourceValue (1 + index);
+    const float x = std::round ((plot.getX() + (float) ph * plot.getWidth()) / U) * U;
+    const float y = std::round (juce::jmap (v, -1.0f, 1.0f, plot.getBottom(), plot.getY()) / U) * U;
+    g.setColour (pal::edgeDark);
+    g.fillRect (x - 4.0f, y - 4.0f, 10.0f, 10.0f);
+    g.setColour (pal::text);
+    g.fillRect (x - 3.0f, y - 3.0f, 6.0f, 6.0f);
+
+    drawTextIn (g, sync ? "SYNC" : "FREE", getLocalBounds().toFloat().reduced (6.0f, 4.0f).withHeight (10.0f),
+                juce::Justification::topRight, 1.0f, sync ? colour : pal::dim);
+}
+
+//==============================================================================
+EnvScope::EnvScope (ColorForgeAudioProcessor& p) : processor (p)
+{
+}
+
+void EnvScope::update()
+{
+    history[(size_t) writePos] = processor.getModSourceValue (3);
+    writePos = (writePos + 1) % (int) history.size();
+    repaint();
+}
+
+void EnvScope::paint (juce::Graphics& g)
+{
+    screen (g, getLocalBounds().toFloat());
+    auto plot = getLocalBounds().toFloat().reduced (8.0f, 8.0f);
+    const float colW = plot.getWidth() / (float) history.size();
+    juce::RectangleList<float> bars;
+    for (size_t i = 0; i < history.size(); ++i)
+    {
+        const float v = history[(writePos + i) % history.size()];
+        const float h = std::floor (v * plot.getHeight() / U) * U;
+        if (h > 0.0f)
+            bars.addWithoutMerging ({ plot.getX() + (float) i * colW, plot.getBottom() - h, juce::jmax (U, colW - U), h });
+    }
+    g.setColour (pal::green.withAlpha (0.75f));
+    g.fillRectList (bars);
+}
+
+//==============================================================================
+ModMatrix::ModMatrix (ColorForgeAudioProcessor& p) : processor (p)
+{
+    auto& apvts = processor.apvts;
+    for (int i = 0; i < cf::kNumModSlots; ++i)
+    {
+        auto& row = rows[(size_t) i];
+        const auto srcId = cf::modId (i, "Src"), dstId = cf::modId (i, "Dst"), amtId = cf::modId (i, "Amt");
+        row.src = std::make_unique<ChoiceControl> (apvts, *apvts.getParameter (srcId), srcId, juce::String(), pal::accent (i));
+        row.dst = std::make_unique<ChoiceControl> (apvts, *apvts.getParameter (dstId), dstId, juce::String(), pal::accent (i));
+        addAndMakeVisible (*row.src);
+        addAndMakeVisible (*row.dst);
+
+        row.amount.setSliderStyle (juce::Slider::LinearHorizontal);
+        row.amount.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 18);
+        row.amount.setColour (juce::Slider::trackColourId, pal::accent (i));
+        row.amount.setTooltip ("How far this slot moves the target (double-click = 0)");
+        addAndMakeVisible (row.amount);
+        row.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (apvts, amtId, row.amount);
+        row.amount.textFromValueFunction = [] (double v) { return (v > 0.0 ? "+" : "") + juce::String (v, 0) + " %"; };
+        row.amount.updateText();
+        row.amount.setDoubleClickReturnValue (true, 0.0);
+    }
+}
+
+void ModMatrix::update()
+{
+    for (int i = 0; i < cf::kNumModSlots; ++i)
+    {
+        const auto& apvts = processor.apvts;
+        const int src = (int) apvts.getRawParameterValue (cf::modId (i, "Src"))->load();
+        const int dst = (int) apvts.getRawParameterValue (cf::modId (i, "Dst"))->load();
+        const float amt = apvts.getRawParameterValue (cf::modId (i, "Amt"))->load() * 0.01f;
+        live[(size_t) i] = (src > 0 && dst > 0) ? amt * processor.getModSourceValue (src) : 0.0f;
+    }
+    repaint();
+}
+
+void ModMatrix::resized()
+{
+    auto r = getLocalBounds().reduced (12, 8);
+    r.removeFromTop (34);   // title + column heads
+    const int rowH = juce::jmin (36, r.getHeight() / cf::kNumModSlots);
+    for (auto& row : rows)
+    {
+        auto line = r.removeFromTop (rowH).withSizeKeepingCentre (r.getWidth(), 26);
+        row.label = line.removeFromLeft (36);
+        row.src->setBounds (line.removeFromLeft (130));
+        line.removeFromLeft (10);
+        row.dst->setBounds (line.removeFromLeft (220));
+        line.removeFromLeft (14);
+        row.meter = line.removeFromRight (160);
+        line.removeFromRight (14);
+        row.amount.setBounds (line);
+    }
+}
+
+void ModMatrix::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    windowFrame (g, r, U, pal::purple.darker (0.2f), pal::panel);
+
+    auto tab = juce::Rectangle<float> (3 * U, 3 * U, textWidth ("MOD MATRIX", 2.0f) + 12.0f, 20.0f);
+    g.setColour (pal::purple);
+    g.fillRect (snap (tab));
+    drawTextIn (g, "MOD MATRIX", tab.reduced (6.0f, 0.0f), juce::Justification::centredLeft, 2.0f, pal::edgeDark);
+    drawTextIn (g, "SOURCE \x04 TARGET \x04 AMOUNT.  THE WHITE PIP ON A KNOB SHOWS WHERE IT IS MODULATED TO",
+                { tab.getRight() + 14.0f, tab.getY() + 5.0f, r.getWidth() - tab.getRight() - 30.0f, 10.0f },
+                juce::Justification::centredLeft, 1.0f, pal::dim);
+
+    for (int i = 0; i < cf::kNumModSlots; ++i)
+    {
+        const auto& row = rows[(size_t) i];
+        const auto c = pal::accent (i);
+        drawTextIn (g, juce::String (i + 1), row.label.toFloat(), juce::Justification::centred, 2.0f, c);
+
+        // live offset: centre line, bar towards the current value
+        auto m = row.meter.toFloat().withSizeKeepingCentre ((float) row.meter.getWidth(), 14.0f);
+        bevel (g, m, U, pal::bgAlt, true);
+        auto inner = m.reduced (U);
+        const float mid = std::round (inner.getCentreX() / U) * U;
+        const float x = std::round ((mid + juce::jlimit (-1.0f, 1.0f, live[(size_t) i]) * inner.getWidth() * 0.5f) / U) * U;
+        g.setColour (c);
+        g.fillRect (snap (inner.withLeft (juce::jmin (mid, x)).withRight (juce::jmax (mid, x) + U)));
+        g.setColour (pal::edgeLight);
+        g.fillRect (mid, inner.getY(), U, inner.getHeight());
+    }
+}
 } // namespace cfui
 
 //==============================================================================
@@ -1773,8 +1977,8 @@ ColorForgeAudioProcessorEditor::ColorForgeAudioProcessorEditor (ColorForgeAudioP
     };
 
     // ---- tabs
-    static const char* tabNames[numPages] = { "1 COLOR", "2 EQ", "3 DYNAMICS", "4 MASTER" };
-    static const juce::Colour tabColours[numPages] = { pal::pink, pal::yellow, pal::orange, pal::green };
+    static const char* tabNames[numPages] = { "1 COLOR", "2 EQ", "3 DYNAMICS", "4 MASTER", "5 MOD" };
+    static const juce::Colour tabColours[numPages] = { pal::pink, pal::yellow, pal::orange, pal::green, pal::purple };
     for (int i = 0; i < numPages; ++i)
     {
         auto t = std::make_unique<juce::TextButton> (tabNames[i]);
@@ -1896,6 +2100,31 @@ ColorForgeAudioProcessorEditor::ColorForgeAudioProcessorEditor (ColorForgeAudioP
              inputPanel.get(), stereoPanel.get(), limiterPanel.get(), outputPanel.get(), loudnessHistory.get() })
         addTo (pageMaster, c);
 
+    // ---- MOD
+    for (int i = 0; i < 2; ++i)
+    {
+        const juce::String id ("lfo" + juce::String (i + 1));
+        const auto shape = id + "Shape", rate = id + "Rate", sync = id + "Sync", div = id + "Div";
+        const auto colour = i == 0 ? pal::cyan : pal::pink;
+        lfoPanels[i] = std::make_unique<FxPanel> (apvts, "LFO " + juce::String (i + 1), colour, nullptr, div.toRawUTF8(),
+            std::vector<ToggleSpec> { { sync.toRawUTF8(), "SYNC" } },
+            std::vector<KnobSpec> { { rate.toRawUTF8(), "RATE" } }, 1, 90);
+        lfoPanels[i]->addExtraCombo (apvts, shape);
+        lfoScopes[i] = std::make_unique<LfoScope> (audioProcessor, i, colour);
+        lfoPanels[i]->addAndMakeVisible (*lfoScopes[i]);
+        addTo (pageMod, lfoPanels[i].get());
+    }
+    envPanel = std::make_unique<FxPanel> (apvts, "ENVELOPE", pal::green, nullptr, nullptr, std::vector<ToggleSpec> {},
+        std::vector<KnobSpec> { { "envAttack", "ATTACK" }, { "envRelease", "RELEASE" }, { "envGain", "SENS" } }, 3, 90);
+    envScope = std::make_unique<EnvScope> (audioProcessor);
+    envPanel->addAndMakeVisible (*envScope);
+    macroPanel = std::make_unique<FxPanel> (apvts, "MACROS", pal::yellow, nullptr, nullptr, std::vector<ToggleSpec> {},
+        std::vector<KnobSpec> { { "macro1", "MACRO 1" }, { "macro2", "MACRO 2" }, { "macro3", "MACRO 3" }, { "macro4", "MACRO 4" } }, 2);
+    modMatrix = std::make_unique<ModMatrix> (audioProcessor);
+    for (juce::Component* c : std::initializer_list<juce::Component*> { lfoPanels[0].get(), lfoPanels[1].get(),
+                                                                         envPanel.get(), macroPanel.get(), modMatrix.get() })
+        addTo (pageMod, c);
+
     sendLookAndFeelChange();
     setResizable (false, false);
     setSize (1280, 820);
@@ -1932,6 +2161,13 @@ void ColorForgeAudioProcessorEditor::timerCallback()
     if (currentPage == pageColor) analyzer->update();
     if (currentPage == pageEq)    eqGraph->update();
     if (currentPage == pageDynamics) { compDisplay->update(); signalPath->repaint(); }
+    if (currentPage == pageMod)
+    {
+        lfoScopes[0]->update();
+        lfoScopes[1]->update();
+        envScope->update();
+        modMatrix->update();
+    }
 
     loudnessHistory->update();   // keeps collecting while hidden
     status->update();
@@ -2075,5 +2311,22 @@ void ColorForgeAudioProcessorEditor::resized()
         outputPanel->setBounds (top);
         c.removeFromTop (gap);
         loudnessHistory->setBounds (c);
+    }
+
+    // ---- MOD
+    {
+        auto c = content;
+        auto top = c.removeFromTop (330);
+        const int w = (top.getWidth() - 3 * gap) / 4;
+        for (auto* panel : { lfoPanels[0].get(), lfoPanels[1].get(), envPanel.get(), macroPanel.get() })
+        {
+            panel->setBounds (top.removeFromLeft (w));
+            top.removeFromLeft (gap);
+        }
+        lfoScopes[0]->setBounds (lfoPanels[0]->getDisplayArea());
+        lfoScopes[1]->setBounds (lfoPanels[1]->getDisplayArea());
+        envScope->setBounds (envPanel->getDisplayArea());
+        c.removeFromTop (gap);
+        modMatrix->setBounds (c);
     }
 }

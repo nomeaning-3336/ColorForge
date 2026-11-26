@@ -308,6 +308,82 @@ void testMatchedBypass()
     check (maxErr < 1.0e-3, "Bypass output is the delayed dry input", maxErr, "max abs error");
 }
 
+void testModulation()
+{
+    // LFO shapes and the envelope follower
+    check (std::abs (cf::ModEngine::shapeValue (cf::ModEngine::triangle, 0.5, 0.0) - 1.0) < 1.0e-9
+               && std::abs (cf::ModEngine::shapeValue (cf::ModEngine::sawUp, 0.0, 0.0) + 1.0) < 1.0e-9,
+           "LFO shapes (triangle peak, saw start)", cf::ModEngine::shapeValue (cf::ModEngine::triangle, 0.5, 0.0), "(want 1)");
+
+    {
+        cf::ModEngine m;
+        m.prepare (kSr);
+        cf::ModEngine::Lfo lp;
+        lp.rateHz = 2.0f;
+        m.setLfo (0, lp);
+        m.setEnvelope (5.0f, 100.0f, 0.0f);
+        std::vector<float> loud (128, 0.5f), quiet (128, 0.0f);
+        for (int i = 0; i < 375; ++i)   // 1 s
+            m.process (loud.data(), loud.data(), 128, 120.0, false, 0.0);
+        const float envLoud = m.value (3);
+        for (int i = 0; i < 375; ++i)
+            m.process (quiet.data(), quiet.data(), 128, 120.0, false, 0.0);
+        check (std::abs (envLoud - (float) ((20.0 * std::log10 (0.5) + 60.0) / 60.0)) < 0.02f && m.value (3) < 0.05f,
+               "Envelope follows the level and falls back", envLoud, "(want 0.90 at -6 dBFS)");
+        check (std::abs (m.getPhase (0)) < 0.01 || std::abs (m.getPhase (0) - 1.0) < 0.01,
+               "Free LFO: 2 Hz is back at phase 0 after 2 s", m.getPhase (0), "phase");
+
+        // synced to the host: phase follows the song position
+        lp.sync = true;
+        lp.beats = 4.0;
+        m.setLfo (0, lp);
+        m.process (quiet.data(), quiet.data(), 128, 128.0, true, 6.0);
+        check (std::abs (m.getPhase (0) - 0.5) < 1.0e-6, "Synced LFO locks to the bar (beat 6 of a 1-bar cycle)", m.getPhase (0), "phase (want 0.5)");
+    }
+
+    // a macro routed to the input gain moves the level, without moving the knob
+    ColorForgeAudioProcessor proc;
+    proc.setRateAndBufferSizeDetails (kSr, 512);
+    proc.prepareToPlay (kSr, 512);
+    auto setParam = [&proc] (const juce::String& id, float plain)
+    {
+        auto* prm = proc.apvts.getParameter (id);
+        prm->setValueNotifyingHost (prm->convertTo0to1 (plain));
+    };
+    auto runLevel = [&proc] ()
+    {
+        juce::AudioBuffer<float> buf (2, 512);
+        juce::MidiBuffer midi;
+        auto in = sine (440.0, 0.05, 48000);
+        std::vector<float> out;
+        for (size_t pos = 0; pos + 512 <= in.size(); pos += 512)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+                buf.copyFrom (ch, 0, in.data() + pos, 512);
+            proc.processBlock (buf, midi);
+            out.insert (out.end(), buf.getReadPointer (0), buf.getReadPointer (0) + 512);
+        }
+        return rmsDb (out, 24000);
+    };
+    const double base = runLevel();
+    setParam ("mod1Src", 4.0f);   // macro 1
+    setParam ("mod1Dst", (float) ColorForgeAudioProcessor::modTargetIndex ("inGain"));
+    setParam ("mod1Amt", 25.0f);  // inGain spans 48 dB, so 25 % of it = +12 dB at full macro
+    setParam ("macro1", 50.0f);
+    const double moved = runLevel();
+    check (std::abs (moved - base - 6.0) < 0.3, "Macro -> input gain: half macro, +6 dB", moved - base, "dB (want 6)");
+    check (proc.apvts.getRawParameterValue ("inGain")->load() == 0.0f, "Modulation leaves the knob value alone",
+           proc.apvts.getRawParameterValue ("inGain")->load(), "dB");
+    check (std::abs (proc.getModOffset (ColorForgeAudioProcessor::modTargetIndex ("inGain")) - 0.125f) < 1.0e-4f,
+           "Mod offset is reported to the editor", proc.getModOffset (ColorForgeAudioProcessor::modTargetIndex ("inGain")), "(want 0.125)");
+
+    int missing = 0;
+    for (int t = 1; t < cf::kNumModTargets; ++t)
+        if (proc.apvts.getParameter (cf::kModTargets[t].id) == nullptr)
+            ++missing;
+    check (missing == 0, "Every mod target is a real parameter", missing, "missing");
+}
+
 void testPresetsAndChain()
 {
     ColorForgeAudioProcessor proc;
@@ -392,7 +468,7 @@ int snapshot (const juce::File& dir)
 {
     dir.createDirectory();
 
-    for (int page = 0; page < 4; ++page)
+    for (int page = 0; page < 5; ++page)
     {
         ColorForgeAudioProcessor proc;
         auto setParam = [&proc] (const char* id, float plain)
@@ -408,6 +484,11 @@ int snapshot (const juce::File& dir)
         setParam ("lmGain", 6.0f);
         if (page == 0)
             setParam ("colorOn", 1.0f);
+        // a couple of mod routings so the MOD page and the knob pips have something to show
+        setParam ("mod1Src", 1.0f);   setParam ("mod1Dst", (float) ColorForgeAudioProcessor::modTargetIndex ("eq4Gain"));  setParam ("mod1Amt", 30.0f);
+        setParam ("mod2Src", 3.0f);   setParam ("mod2Dst", (float) ColorForgeAudioProcessor::modTargetIndex ("satDrive")); setParam ("mod2Amt", -40.0f);
+        setParam ("mod3Src", 4.0f);   setParam ("mod3Dst", (float) ColorForgeAudioProcessor::modTargetIndex ("imgWidth")); setParam ("mod3Amt", 50.0f);
+        setParam ("macro1", 60.0f);   setParam ("lfo2Shape", 5.0f);   setParam ("lfo2Sync", 1.0f);
         proc.apvts.state.setProperty ("uiPage", page, nullptr);
 
         proc.setRateAndBufferSizeDetails (kSr, 512);
@@ -467,6 +548,7 @@ int main (int argc, char** argv)
     testDynamicEq();
     testOttBands();
     testMatchedBypass();
+    testModulation();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
     return failures == 0 ? 0 : 1;
