@@ -553,6 +553,45 @@ private:
 };
 
 //==============================================================================
+/** Runs one export on a background thread so the window stays responsive and can show progress. */
+class ExportJob final : public juce::Thread
+{
+public:
+    ExportJob (juce::AudioFormatManager& f, juce::File in, juce::File out, juce::MemoryBlock s,
+               std::unique_ptr<cf::Automation> a, int b)
+        : juce::Thread ("ColorForge export"), formats (f), input (std::move (in)), output (std::move (out)),
+          state (std::move (s)), automation (std::move (a)), bits (b)
+    {
+        startThread();
+    }
+
+    ~ExportJob() override { stopThread (10000); }
+
+    void run() override
+    {
+        result = cf::renderFile (formats, input, output, &state, automation.get(), bits,
+                                 [this] (double p) { progress = (float) p; return ! threadShouldExit(); });
+        finished = true;
+    }
+
+    bool isFinished() const noexcept         { return finished; }
+    float getProgress() const noexcept       { return progress; }
+    const juce::Result& getResult() const    { return result; }
+    const juce::File& getOutput() const      { return output; }
+    int getBits() const noexcept             { return bits; }
+
+private:
+    juce::AudioFormatManager& formats;
+    juce::File input, output;
+    juce::MemoryBlock state;
+    std::unique_ptr<cf::Automation> automation;
+    int bits;
+    juce::Result result { juce::Result::ok() };
+    std::atomic<float> progress { 0.0f };
+    std::atomic<bool> finished { false };
+};
+
+//==============================================================================
 class PlayerComponent final : public juce::Component,
                               public juce::FileDragAndDropTarget,
                               private juce::Timer
@@ -580,7 +619,8 @@ public:
 
         addAndMakeVisible (exportButton);
         exportButton.setEnabled (false);
-        exportButton.onClick = [this] { exportFile(); };
+        exportButton.onClick = [this] { showExportMenu(); };
+        exportButton.setTooltip (kExportTip);
 
         addAndMakeVisible (audioButton);
         audioButton.onClick = [this] { showAudioSettings(); };
@@ -644,6 +684,7 @@ public:
     ~PlayerComponent() override
     {
         stopTimer();
+        exportJob.reset();   // cancels a running export and removes its partial file
         setLookAndFeel (nullptr);
 
         if (editor != nullptr)
@@ -681,6 +722,22 @@ public:
     void paint (juce::Graphics& g) override
     {
         g.fillAll (kBackground);
+
+        if (exportJob != nullptr)
+        {
+            // blocky progress bar under the status text: 40 cells, filled left to right
+            auto bar = statusLabel.getBounds().withTop (statusLabel.getBottom() - 6).withHeight (5);
+            constexpr int cells = 40;
+            const int lit = (int) (exportJob->getProgress() * cells);
+            const float cellW = (float) bar.getWidth() / cells;
+
+            for (int i = 0; i < cells; ++i)
+            {
+                const auto x = bar.getX() + (int) (i * cellW);
+                g.setColour (i < lit ? cfui::px::pal::green : cfui::px::pal::panelHi);
+                g.fillRect (x, bar.getY(), juce::jmax (1, (int) cellW - 1), bar.getHeight());
+            }
+        }
     }
 
     void resized() override
@@ -759,7 +816,32 @@ private:
                               });
     }
 
-    /** Renders the loaded file through the current plugin settings into a WAV. */
+    void showExportMenu()
+    {
+        if (exportJob != nullptr)
+        {
+            exportJob->signalThreadShouldExit();   // the button reads "Cancel" while exporting
+            return;
+        }
+
+        if (! currentFile.existsAsFile())
+            return;
+
+        juce::PopupMenu m;
+        m.addItem (16, "16-bit WAV (uploads: Suno, streaming, CD)", true, exportBits == 16);
+        m.addItem (24, "24-bit WAV (studio master)", true, exportBits == 24);
+
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&exportButton), [this] (int r)
+        {
+            if (r == 16 || r == 24)
+            {
+                exportBits = r;
+                exportFile();
+            }
+        });
+    }
+
+    /** Renders the loaded file through the current plugin settings into a PCM WAV. */
     void exportFile()
     {
         if (! currentFile.existsAsFile())
@@ -784,17 +866,20 @@ private:
 
                                   juce::MemoryBlock state;
                                   engine.processor.getStateInformation (state);
-                                  cf::Automation laneCopy;
-                                  laneCopy.copyFrom (engine.automation);
+                                  std::unique_ptr<cf::Automation> laneCopy;
 
-                                  juce::MouseCursor::showWaitCursor();
-                                  const auto result = cf::renderFile (engine.formatManager, currentFile, target, &state,
-                                                                      laneCopy.isEmpty() ? nullptr : &laneCopy);
-                                  juce::MouseCursor::hideWaitCursor();
+                                  if (! engine.automation.isEmpty())
+                                  {
+                                      laneCopy = std::make_unique<cf::Automation>();
+                                      laneCopy->copyFrom (engine.automation);
+                                  }
 
-                                  statusLabel.setText (result.wasOk() ? "Exported " + target.getFileName()
-                                                                      : result.getErrorMessage(),
-                                                       juce::dontSendNotification);
+                                  exportJob = std::make_unique<ExportJob> (engine.formatManager, currentFile, target,
+                                                                           std::move (state), std::move (laneCopy), exportBits);
+                                  exportButton.setButtonText ("Cancel");
+                                  exportButton.setTooltip ("Stop the export (nothing is left behind)");
+                                  openButton.setEnabled (false);
+                                  updateExportStatus();
                               });
     }
 
@@ -875,8 +960,35 @@ private:
         options.launchAsync();
     }
 
+    /** Status line and pixel progress bar while an export runs; tidies up when it ends. */
+    void updateExportStatus()
+    {
+        if (exportJob == nullptr)
+            return;
+
+        if (! exportJob->isFinished())
+        {
+            const int pct = juce::jlimit (0, 99, (int) (exportJob->getProgress() * 100.0f));
+            setStatus ("Exporting " + exportJob->getOutput().getFileName() + "  " + juce::String (pct)
+                       + "%  (wait for it before uploading)");
+            repaint (statusLabel.getBounds().expanded (0, 6));
+            return;
+        }
+
+        const auto& result = exportJob->getResult();
+        setStatus (result.wasOk() ? "Exported " + exportJob->getOutput().getFileName() + " ("
+                                        + juce::String (exportJob->getBits()) + "-bit PCM) - ready to upload"
+                                  : result.getErrorMessage());
+        exportJob.reset();
+        exportButton.setButtonText ("Export WAV");
+        exportButton.setTooltip (kExportTip);
+        openButton.setEnabled (true);
+        repaint (statusLabel.getBounds().expanded (0, 6));
+    }
+
     void timerCallback() override
     {
+        updateExportStatus();
         playButton.setButtonText (engine.transport.isPlaying() ? "Stop" : "Play");
         recorder.tick();
         playButton.setEnabled (engine.hasFile());
@@ -888,6 +1000,9 @@ private:
     AutomationRecorder recorder { engine };
     cfui::PixelLookAndFeel lnf;
     juce::MidiKeyboardComponent keyboard { engine.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard };
+    static constexpr const char* kExportTip = "Render to a standard PCM WAV (16 or 24-bit, 44.1/48 kHz) that upload sites accept";
+    int exportBits = 16;
+    std::unique_ptr<ExportJob> exportJob;
     juce::TextButton openButton { "Open..." }, playButton { "Play" }, exportButton { "Export WAV" },
                      audioButton { "Audio Settings" };
     juce::ToggleButton loopButton { "Loop" }, recButton { "REC" }, readButton { "READ" };
@@ -1116,7 +1231,7 @@ public:
     PlayerApplication() = default;
 
     const juce::String getApplicationName() override        { return "ColorForge Player"; }
-    const juce::String getApplicationVersion() override     { return "2.2.0"; }
+    const juce::String getApplicationVersion() override     { return "2.2.1"; }
     bool moreThanOneInstanceAllowed() override              { return true; }
 
     void initialise (const juce::String& commandLine) override

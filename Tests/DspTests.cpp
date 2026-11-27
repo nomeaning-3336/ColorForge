@@ -5,6 +5,7 @@
 #include "OfflineRender.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 #include <random>
 #include <vector>
@@ -710,6 +711,83 @@ int snapshot (const juce::File& dir)
 }
 } // namespace
 
+//==============================================================================
+// Exports must be plain PCM WAVs (44-byte header, format tag 1), which upload sites accept.
+void testPcmExport()
+{
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("cf-export-test");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+
+    for (const double srcRate : { 48000.0, 96000.0 })
+    {
+        const auto in = dir.getChildFile ("in.wav");
+        {
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (new juce::FileOutputStream (in), srcRate, 2, 24, {}, 0));
+            std::vector<float> sig ((size_t) srcRate);
+            for (size_t i = 0; i < sig.size(); ++i)
+                sig[i] = (float) (0.1 * std::sin (2.0 * kPi * 1000.0 * (double) i / srcRate));
+            const float* chans[] = { sig.data(), sig.data() };
+            w->writeFromFloatArrays (chans, 2, (int) sig.size());
+        }
+
+        for (const int bits : { 16, 24 })
+        {
+            const auto out = dir.getChildFile ("out.wav");
+            const auto result = cf::renderFile (fm, in, out, nullptr, nullptr, bits);
+
+            juce::MemoryBlock data;
+            out.loadFileAsData (data);
+            const auto* b = static_cast<const unsigned char*> (data.getData());
+            auto u16 = [b] (int i) { return (int) (b[i] | (b[i + 1] << 8)); };
+            auto u32 = [b] (int i) { return (juce::uint32) (b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | ((juce::uint32) b[i + 3] << 24)); };
+
+            const bool header = data.getSize() > 44 && std::memcmp (b, "RIFF", 4) == 0 && std::memcmp (b + 8, "WAVEfmt ", 8) == 0
+                                && u32 (16) == 16 && u16 (20) == 1 && u16 (22) == 2 && u32 (24) == 48000 && u16 (34) == bits
+                                && std::memcmp (b + 36, "data", 4) == 0 && u32 (40) + 44 + (u32 (40) & 1) == data.getSize()
+                                && u32 (4) + 8 == data.getSize();
+
+            // the tone survives at the right pitch and level, lined up with the source
+            double level = -999.0, onsetMs = -1.0;
+            if (std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (out) })
+            {
+                juce::AudioBuffer<float> buf (2, (int) r->lengthInSamples);
+                r->read (&buf, 0, buf.getNumSamples(), 0, true, true);
+                const float* d = buf.getReadPointer (0);
+                std::vector<float> mid (d + 12000, d + 36000);
+                level = rmsDb (mid, 0);
+                for (int i = 0; i < 2000; ++i)
+                    if (std::abs (d[i]) > 0.01f) { onsetMs = 1000.0 * i / 48000.0; break; }
+                // count zero crossings over 0.5 s -> 1000 Hz gives 1000
+                int zc = 0;
+                for (size_t i = 1; i < mid.size(); ++i)
+                    zc += (mid[i - 1] < 0.0f) != (mid[i] < 0.0f);
+                if (std::abs (zc - 1000) > 4)
+                    level = -999.0;
+            }
+
+            const bool ok = result.wasOk() && header && std::abs (level - (20.0 * std::log10 (0.1 / std::sqrt (2.0)))) < 0.5
+                            && onsetMs >= 0.0 && onsetMs < 0.5;
+            const auto name = juce::String ("Export is plain PCM: ") + juce::String (bits) + "-bit from "
+                              + juce::String ((int) srcRate / 1000) + " kHz";
+            check (ok, name.toRawUTF8(), level, "dB 1 kHz tone (want -23.0)");
+        }
+    }
+
+    // a cancelled export leaves neither the file nor its .part behind
+    {
+        const auto in = dir.getChildFile ("in.wav"), out = dir.getChildFile ("cancel.wav");
+        const auto result = cf::renderFile (fm, in, out, nullptr, nullptr, 16, [] (double p) { return p < 0.3; });
+        const bool clean = result.failed() && ! out.exists() && ! dir.getChildFile ("cancel.wav.part").exists();
+        check (clean, "Cancelled export leaves no file behind", (double) dir.getNumberOfChildFiles (juce::File::findFiles), "files left (want 2: in + out)");
+    }
+
+    dir.deleteRecursively();
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juceInit;
@@ -731,6 +809,7 @@ int main (int argc, char** argv)
     testModulation();
     testAutomation();
     testTransientShaper();
+    testPcmExport();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

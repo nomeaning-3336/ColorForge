@@ -2,14 +2,24 @@
 
 #include "PluginProcessor.h"
 #include "Automation.h"
+#include "WavExport.h"
+
+#include <functional>
 
 namespace cf {
 
-/** Renders a file offline through a fresh ColorForge instance into a 24-bit stereo WAV.
+/** Renders a file offline through a fresh ColorForge instance into a plain PCM stereo WAV
+    (16 or 24-bit, 44.1 or 48 kHz: see PcmWavWriter and exportRateFor).
     `state` reuses the settings of a live instance (nullptr = defaults) and `automation`
-    plays its lanes in file time (nullptr = none). */
+    plays its lanes in file time (nullptr = none).
+
+    The audio goes to "<output>.part" and is renamed to `output` only once it is complete, so a
+    half-written export never sits under the real name. `progress` (optional) gets 0..1 and can
+    return false to cancel; a cancelled render leaves nothing behind. */
 inline juce::Result renderFile (juce::AudioFormatManager& formats, const juce::File& input, const juce::File& output,
-                                const juce::MemoryBlock* state, const Automation* automation = nullptr)
+                                const juce::MemoryBlock* state, const Automation* automation = nullptr,
+                                int bitsPerSample = 24,
+                                const std::function<bool (double)>& progress = {})
 {
     std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (input));
 
@@ -31,19 +41,15 @@ inline juce::Result renderFile (juce::AudioFormatManager& formats, const juce::F
     processor.setRateAndBufferSizeDetails (rate, block);
     processor.prepareToPlay (rate, block);
 
-    output.deleteFile();
-    std::unique_ptr<juce::FileOutputStream> stream (output.createOutputStream());
+    const int outRate = exportRateFor (rate);
+    StereoResampler resampler (rate, outRate);
+    juce::AudioBuffer<float> resampled;
+    const auto partial = output.getSiblingFile (output.getFileName() + ".part");
+    struct RemovePartial { const juce::File& f; ~RemovePartial() { f.deleteFile(); } } cleanup { partial };
+    PcmWavWriter writer;   // declared after `cleanup`, so it closes the file before it is removed
 
-    if (stream == nullptr)
-        return juce::Result::fail ("Can't write " + output.getFileName());
-
-    juce::WavAudioFormat wav;
-    std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), rate, 2, 24, {}, 0));
-
-    if (writer == nullptr)
-        return juce::Result::fail ("Can't create a WAV writer for " + output.getFileName());
-
-    stream.release();   // the writer owns the stream now
+    if (auto opened = writer.open (partial, outRate, bitsPerSample == 16 ? 16 : 24); opened.failed())
+        return opened;
 
     const juce::int64 latency = processor.getLatencySamples();
     const juce::int64 length = reader->lengthInSamples;
@@ -54,6 +60,9 @@ inline juce::Result renderFile (juce::AudioFormatManager& formats, const juce::F
 
     for (juce::int64 pos = 0; pos < total; pos += block)
     {
+        if (progress && (pos & 0x3fff) == 0 && ! progress ((double) pos / (double) total))
+            return juce::Result::fail ("Export cancelled");
+
         buffer.clear();
 
         if (pos < length)
@@ -68,11 +77,37 @@ inline juce::Result renderFile (juce::AudioFormatManager& formats, const juce::F
         // Drop the plugin latency so the export lines up with the source file.
         const int skip = (int) juce::jlimit ((juce::int64) 0, (juce::int64) block, latency - pos);
 
-        if (skip < block && ! writer->writeFromAudioSampleBuffer (buffer, skip, block - skip))
+        if (skip >= block)
+            continue;
+
+        bool ok = true;
+
+        if (resampler.isNeeded())
+        {
+            int frames = 0;
+            resampler.process (buffer, skip, block - skip, resampled, frames);
+            ok = frames == 0 || writer.write (resampled, 0, frames);
+        }
+        else
+        {
+            ok = writer.write (buffer, skip, block - skip);
+        }
+
+        if (! ok)
             return juce::Result::fail ("Write error on " + output.getFileName());
     }
 
-    writer.reset();
+    if (! writer.finish())
+        return juce::Result::fail ("Write error on " + output.getFileName());
+
+    output.deleteFile();
+
+    if (! partial.moveFileTo (output))
+        return juce::Result::fail ("Can't write " + output.getFileName());
+
+    if (progress)
+        progress (1.0);
+
     return juce::Result::ok();
 }
 
