@@ -192,9 +192,12 @@ ColorForgeAudioProcessor::ColorForgeAudioProcessor()
     p.lmMode = ref ("lmMode");        p.lmGain = ref ("lmGain");        p.lmCeiling = ref ("lmCeiling");
     p.lmRelease = ref ("lmRelease");
 
+    p.trOn = ref ("trOn");            p.trAttack = ref ("trAttack");    p.trSustain = ref ("trSustain");
+    p.trMix = ref ("trMix");          p.trOut = ref ("trOut");
+
     apvts.state.setProperty (kLufsTargetProp, 2, nullptr);   // streaming, -14 LUFS
     apvts.state.setProperty (kPresetNameProp, "INIT", nullptr);
-    apvts.state.setProperty (kChainProp, "EQ,COMP,SAT,STEREO", nullptr);
+    apvts.state.setProperty (kChainProp, "TRANS,EQ,COMP,SAT,STEREO", nullptr);
     apvts.state.addListener (this);
 }
 
@@ -206,7 +209,7 @@ ColorForgeAudioProcessor::~ColorForgeAudioProcessor()
 //==============================================================================
 const char* ColorForgeAudioProcessor::chainModuleName (int module) noexcept
 {
-    static const char* names[] = { "EQ", "COMP", "SAT", "STEREO" };
+    static const char* names[] = { "EQ", "COMP", "SAT", "STEREO", "TRANS" };
     return names[juce::jlimit (0, (int) numChainModules - 1, module)];
 }
 
@@ -215,7 +218,7 @@ std::array<int, ColorForgeAudioProcessor::numChainModules> ColorForgeAudioProces
     const int packed = chainPacked.load (std::memory_order_relaxed);
     std::array<int, numChainModules> order {};
     for (int i = 0; i < numChainModules; ++i)
-        order[(size_t) i] = (packed >> (2 * i)) & 3;
+        order[(size_t) i] = (packed >> (3 * i)) & 7;
     return order;
 }
 
@@ -230,9 +233,17 @@ void ColorForgeAudioProcessor::setChainOrder (const std::array<int, numChainModu
 void ColorForgeAudioProcessor::readChainOrderFromState()
 {
     auto names = juce::StringArray::fromTokens (apvts.state.getProperty (kChainProp, "").toString(), ",", "");
-    std::array<int, numChainModules> order { -1, -1, -1, -1 };
+    std::array<int, numChainModules> order {};
+    order.fill (-1);
     bool used[numChainModules] {};
     int n = 0;
+
+    // sessions from before 2.2 have no TRANS slot: the shaper goes first, ahead of the EQ
+    if (! names.isEmpty() && ! names.joinIntoString (",").containsIgnoreCase (chainModuleName (modTrans)))
+    {
+        order[(size_t) n++] = modTrans;
+        used[modTrans] = true;
+    }
 
     for (const auto& name : names)
         for (int m = 0; m < numChainModules; ++m)
@@ -248,7 +259,7 @@ void ColorForgeAudioProcessor::readChainOrderFromState()
 
     int packed = 0;
     for (int i = 0; i < numChainModules; ++i)
-        packed |= order[(size_t) i] << (2 * i);
+        packed |= order[(size_t) i] << (3 * i);
     chainPacked.store (packed, std::memory_order_relaxed);
 }
 
@@ -380,6 +391,7 @@ void ColorForgeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     eq.prepare (sampleRate, kChunk);
     comp.prepare (sampleRate);
     sat.prepare (sampleRate);
+    trans.prepare (sampleRate);
     imager.prepare (sampleRate);
     limiter.prepare (sampleRate);
     meter.prepare (sampleRate);
@@ -689,6 +701,15 @@ void ColorForgeAudioProcessor::updateParameters()
         sat.setParams (sp);
     }
     {
+        cf::TransientShaper::Params tp;
+        tp.on = isOn (p.trOn);
+        tp.attack = val (p.trAttack) / 100.0f;
+        tp.sustain = val (p.trSustain) / 100.0f;
+        tp.mix = pct (p.trMix);
+        tp.outDb = val (p.trOut);
+        trans.setParams (tp);
+    }
+    {
         cf::StereoImager::Params ip;
         ip.on = isOn (p.imgOn);
         ip.width = pct (p.imgWidth);
@@ -826,11 +847,12 @@ void ColorForgeAudioProcessor::processChunk (float* l, float* r, int num)
     const int packed = chainPacked.load (std::memory_order_relaxed);
     for (int i = 0; i < numChainModules; ++i)
     {
-        switch ((packed >> (2 * i)) & 3)
+        switch ((packed >> (3 * i)) & 7)
         {
             case modEq:   eq.process (l, r, num);     break;
             case modComp: comp.process (l, r, num);   break;
             case modSat:  sat.process (l, r, num);    break;
+            case modTrans: trans.process (l, r, num); break;
             default:      imager.process (l, r, num); break;
         }
     }

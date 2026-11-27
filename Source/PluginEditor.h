@@ -259,7 +259,24 @@ private:
 };
 
 //==============================================================================
-/** Short-term loudness over the last minute, with the target zone. */
+/** Scrolling strip of the transient shaper's gain: boosts up, cuts down. */
+class TransientMeter : public juce::Component
+{
+public:
+    explicit TransientMeter (ColorForgeAudioProcessor&);
+
+    void update();
+    void paint (juce::Graphics&) override;
+
+private:
+    ColorForgeAudioProcessor& processor;
+    std::array<std::pair<float, float>, 120> history {};
+    int writePos = 0;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TransientMeter)
+};
+
+//=======================================================================/** Short-term loudness over the last minute, with the target zone. */
 class LoudnessHistory : public juce::Component
 {
 public:
@@ -312,10 +329,10 @@ public:
     void mouseUp (const juce::MouseEvent&) override;
 
 private:
-    static constexpr int kNodes = 8;
+    static constexpr int kNodes = 9;
     void layoutNodes();
     int nodeAt (juce::Point<float>) const;
-    /** Node index -> what it is: -1 IN, -2 COLOR, -3 LIMIT, -4 OUT, or a chain module (0..3). */
+    /** Node index -> what it is: -1 IN, -2 COLOR, -3 LIMIT, -4 OUT, or a chain module (0..4). */
     int moduleAtNode (int node) const;
 
     ColorForgeAudioProcessor& processor;
@@ -459,7 +476,8 @@ private:
     std::array<std::unique_ptr<cfui::FxPanel>, cf::kEqBands> eqBands;
 
     // DYNAMICS
-    std::unique_ptr<cfui::FxPanel> compPanel, satPanel;
+    std::unique_ptr<cfui::FxPanel> compPanel, satPanel, transPanel;
+    std::unique_ptr<cfui::TransientMeter> transMeter;
     std::unique_ptr<cfui::CompDisplay> compDisplay;
     std::unique_ptr<cfui::SignalPath> signalPath;
 
