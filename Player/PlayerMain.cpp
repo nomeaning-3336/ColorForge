@@ -902,38 +902,87 @@ private:
 };
 
 //==============================================================================
-class MainWindow final : public juce::DocumentWindow
+/** Holds the player at its design size and scales it to whatever size the
+    window is, so the whole UI shrinks or grows together and keeps its aspect. */
+class ScaledContent final : public juce::Component
+{
+public:
+    explicit ScaledContent (std::unique_ptr<PlayerComponent> p)
+        : player (std::move (p)),
+          designW (player->getWidth()),
+          designH (player->getHeight())
+    {
+        addAndMakeVisible (*player);
+        setSize (designW, designH);
+    }
+
+    int getDesignWidth() const noexcept       { return designW; }
+    int getDesignHeight() const noexcept      { return designH; }
+    PlayerComponent& getPlayer() noexcept     { return *player; }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (kBackground);
+    }
+
+    void resized() override
+    {
+        const auto scale = juce::jmin ((float) getWidth() / (float) designW,
+                                       (float) getHeight() / (float) designH);
+        // centre it: only matters when maximised to a screen of another shape
+        const auto x = ((float) getWidth()  - (float) designW * scale) * 0.5f;
+        const auto y = ((float) getHeight() - (float) designH * scale) * 0.5f;
+
+        player->setBounds (0, 0, designW, designH);
+        player->setTransform (juce::AffineTransform::scale (scale).translated (x, y));
+    }
+
+    void focusGained (FocusChangeType) override
+    {
+        player->grabKeyboardFocus();
+    }
+
+private:
+    std::unique_ptr<PlayerComponent> player;
+    const int designW, designH;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ScaledContent)
+};
+
+//==============================================================================
+/** The player window. It is resizable at a fixed aspect ratio and always fits
+    the screen it is on: when it opens, when it is dragged to another monitor,
+    and when monitors are unplugged or their scaling changes. */
+class MainWindow final : public juce::DocumentWindow,
+                         private juce::Timer
 {
 public:
     explicit MainWindow (const juce::String& commandLine)
         : DocumentWindow ("ColorForge Player", kBackground,
-                          juce::DocumentWindow::minimiseButton | juce::DocumentWindow::closeButton)
+                          juce::DocumentWindow::minimiseButton
+                            | juce::DocumentWindow::maximiseButton
+                            | juce::DocumentWindow::closeButton)
     {
         setUsingNativeTitleBar (true);
 
-        auto* content = new PlayerComponent();
+        content = new ScaledContent (std::make_unique<PlayerComponent>());
         setContentOwned (content, true);
-        setResizable (false, false);
 
-        // Shrink the whole UI on screens that are too small for it.
-        if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
-        {
-            const auto avail = display->userArea;
-            const float scale = juce::jmin (1.0f,
-                                            (float) (avail.getHeight() - 48) / (float) getHeight(),
-                                            (float) (avail.getWidth() - 16) / (float) getWidth());
+        const auto dw = content->getDesignWidth(), dh = content->getDesignHeight();
+        setResizable (true, false);
+        setResizeLimits (juce::roundToInt (dw * kMinScale), juce::roundToInt (dh * kMinScale),
+                         juce::roundToInt (dw * kMaxScale), juce::roundToInt (dh * kMaxScale));
+        getConstrainer()->setFixedAspectRatio ((double) dw / (double) dh);
 
-            if (scale < 0.999f)
-                juce::Desktop::getInstance().setGlobalScaleFactor (juce::jmax (0.5f, scale));
-        }
-
-        centreWithSize (getWidth(), getHeight());
         setVisible (true);
+        fitToDisplay (true);
+        displaySignature = currentDisplaySignature();
+        startTimer (500);
 
         const auto arg = commandLine.unquoted().trim();
 
         if (arg.isNotEmpty())
-            content->load (juce::File::getCurrentWorkingDirectory().getChildFile (arg));
+            content->getPlayer().load (juce::File::getCurrentWorkingDirectory().getChildFile (arg));
     }
 
     void closeButtonPressed() override
@@ -941,7 +990,122 @@ public:
         juce::JUCEApplication::getInstance()->systemRequestedQuit();
     }
 
+    void moved() override
+    {
+        DocumentWindow::moved();
+        // Windows sends a stream of moves while dragging; refit once it settles.
+        pendingFit = true;
+        lastMoveMs = juce::Time::getMillisecondCounter();
+    }
+
+    void resized() override
+    {
+        DocumentWindow::resized();
+
+        // A size the user picked (by dragging the border) becomes the size we go
+        // back to when the window lands on a screen big enough for it.
+        if (! fitting && ! isFullScreen() && ! isMinimised() && content != nullptr)
+            preferredScale = (float) content->getWidth() / (float) content->getDesignWidth();
+    }
+
 private:
+    static constexpr float kMinScale = 0.4f, kMaxScale = 2.0f;
+
+    /** Bounds of every display and its scale, so a change to any of them shows up. */
+    static juce::String currentDisplaySignature()
+    {
+        juce::String sig;
+        for (const auto& d : juce::Desktop::getInstance().getDisplays().displays)
+            sig << d.userArea.toString() << '@' << d.scale << ';';
+        return sig;
+    }
+
+    juce::Rectangle<int> currentWorkArea() const
+    {
+        const auto& displays = juce::Desktop::getInstance().getDisplays();
+        const auto* display = displays.getDisplayForRect (getScreenBounds());
+
+        if (display == nullptr)
+            display = displays.getPrimaryDisplay();
+
+        return display != nullptr ? display->userArea : juce::Rectangle<int> (0, 0, 1280, 720);
+    }
+
+    void fitToDisplay (bool centre)
+    {
+        if (content == nullptr || isMinimised())
+            return;
+
+        const auto area = currentWorkArea();
+
+        if (isFullScreen())
+        {
+            // a maximised window follows the OS; just make sure it's on this screen
+            if (! area.intersects (getScreenBounds()))
+                setBounds (area);
+            return;
+        }
+
+        // room for the native frame and title bar
+        juce::BorderSize<int> frame (32, 8, 8, 8);
+        if (auto* peer = getPeer())
+            if (const auto f = peer->getFrameSizeIfPresent())
+                frame = *f;
+
+        const auto availW = area.getWidth()  - frame.getLeftAndRight();
+        const auto availH = area.getHeight() - frame.getTopAndBottom();
+        const auto dw = content->getDesignWidth(), dh = content->getDesignHeight();
+
+        const auto scale = juce::jlimit (kMinScale, kMaxScale,
+                                         juce::jmin (preferredScale,
+                                                     (float) availW / (float) dw,
+                                                     (float) availH / (float) dh));
+
+        const auto w = juce::roundToInt ((float) dw * scale);
+        const auto h = juce::roundToInt ((float) dh * scale);
+
+        // keep the window where it is unless that pushes it off this screen
+        auto inner = area.withTrimmedLeft (frame.getLeft()).withTrimmedRight (frame.getRight())
+                         .withTrimmedTop (frame.getTop()).withTrimmedBottom (frame.getBottom());
+        auto bounds = centre ? inner.withSizeKeepingCentre (w, h)
+                             : getBounds().withSize (w, h).constrainedWithin (inner);
+
+        if (bounds != getBounds())
+        {
+            const juce::ScopedValueSetter<bool> svs (fitting, true);
+            setBounds (bounds);
+        }
+    }
+
+    void timerCallback() override
+    {
+        const auto sig = currentDisplaySignature();
+
+        if (sig != displaySignature)
+        {
+            // a monitor was plugged in or out, or its scaling changed
+            displaySignature = sig;
+            fitToDisplay (! currentWorkArea().intersects (getScreenBounds()));
+            pendingFit = false;
+            return;
+        }
+
+        // the real button state: native title-bar drags never reach JUCE as mouse events
+        const bool mouseDown = juce::ModifierKeys::getCurrentModifiersRealtime().isAnyMouseButtonDown();
+
+        if (pendingFit && ! mouseDown && juce::Time::getMillisecondCounter() - lastMoveMs > 300)
+        {
+            pendingFit = false;
+            fitToDisplay (false);
+        }
+    }
+
+    ScaledContent* content = nullptr;
+    float preferredScale = 1.0f;
+    bool fitting = false, pendingFit = false;
+    juce::uint32 lastMoveMs = 0;
+    juce::String displaySignature;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)
 };
 
