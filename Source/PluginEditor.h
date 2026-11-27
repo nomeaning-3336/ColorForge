@@ -259,7 +259,7 @@ private:
 };
 
 //==============================================================================
-/** Short-term loudness over the last minute, with the quest target zone. */
+/** Short-term loudness over the last minute, with the target zone. */
 class LoudnessHistory : public juce::Component
 {
 public:
@@ -299,7 +299,7 @@ private:
 };
 
 //==============================================================================
-/** The processing chain drawn as a game-style level map; lit nodes are on. */
+/** The processing chain as a node map; lit nodes are on. */
 class SignalPath : public juce::Component
 {
 public:
@@ -329,7 +329,7 @@ private:
 
 //==============================================================================
 /** Always-visible right column: peak / loudness / correlation / GR meters
-    and the loudness "quest". */
+    and the loudness target readout. */
 class StatusPanel : public juce::Component
 {
 public:
@@ -351,11 +351,7 @@ private:
 
     float peakL = -100.0f, peakR = -100.0f, lufsM = -70.0f, lufsS = -70.0f, lufsI = -70.0f;
     float truePeak = -100.0f, corr = 0.0f, compGr = 0.0f, limGr = 0.0f;
-    double zoneSeconds = 0.0;
-    juce::uint32 lastTick = 0;
-    int frame = 0;
-
-    juce::Rectangle<int> metersArea, questArea;
+    juce::Rectangle<int> metersArea, targetArea;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StatusPanel)
 };

@@ -1556,20 +1556,18 @@ StatusPanel::StatusPanel (ColorForgeAudioProcessor& p) : processor (p)
     targetBox.setSelectedId ((int) processor.apvts.state.getProperty (ColorForgeAudioProcessor::kLufsTargetProp, 2) + 1,
                              juce::dontSendNotification);
     targetBox.getProperties().set ("pxScale", 1.5f);
-    targetBox.setTooltip ("Loudness target for the quest (integrated / short-term LUFS)");
+    targetBox.setTooltip ("Loudness target (LUFS) to compare the short-term and integrated loudness against");
     targetBox.onChange = [this]
     {
         processor.apvts.state.setProperty (ColorForgeAudioProcessor::kLufsTargetProp, targetBox.getSelectedId() - 1, nullptr);
-        zoneSeconds = 0.0;
     };
     addAndMakeVisible (targetBox);
 
     resetButton.getProperties().set ("pxScale", 1.5f);
-    resetButton.setTooltip ("Reset the integrated loudness, true peak and quest timer");
+    resetButton.setTooltip ("Reset the integrated loudness and the true-peak hold");
     resetButton.onClick = [this]
     {
         processor.meter.resetRequested.store (true);
-        zoneSeconds = 0.0;
     };
     addAndMakeVisible (resetButton);
 
@@ -1589,11 +1587,11 @@ float StatusPanel::targetLufs() const
 void StatusPanel::resized()
 {
     auto r = getLocalBounds().reduced (12);
-    questArea = r.removeFromBottom (210);
+    targetArea = r.removeFromBottom (190);
     metersArea = r;
     bypassButton.setBounds (r.removeFromTop (22).removeFromRight (100));
 
-    auto q = questArea.reduced (10).withTrimmedTop (30);
+    auto q = targetArea.reduced (10).withTrimmedTop (30);
     auto row = q.removeFromTop (24);
     resetButton.setBounds (row.removeFromRight (64));
     row.removeFromRight (6);
@@ -1614,14 +1612,7 @@ void StatusPanel::update()
     limGr = processor.getLimiterGainReductionDb();
     matchDb = processor.getBypassMatchDb();
 
-    // the quest timer only runs while the short-term loudness sits in the target zone
-    const auto now = juce::Time::getMillisecondCounter();
-    const double dt = lastTick == 0 ? 0.0 : juce::jlimit (0.0, 0.25, (double) (now - lastTick) * 0.001);
-    lastTick = now;
-    if (lufsS > cf::LoudnessMeter::kFloor + 0.5f && std::abs (lufsS - targetLufs()) <= 1.0f)
-        zoneSeconds += dt;
 
-    ++frame;
     repaint();
 }
 
@@ -1726,63 +1717,59 @@ void StatusPanel::paint (juce::Graphics& g)
         value (row, (matchDb >= 0.0f ? "+" : "") + juce::String (matchDb, 1) + " DB", byp ? pal::red : pal::dim, 1.5f);
     }
 
-    // ---- quest
-    auto q = questArea.toFloat();
+    // ---- loudness target: how far the mix sits from the chosen target and the ceiling
+    auto q = targetArea.toFloat();
     windowFrame (g, q, U, pal::yellow.darker (0.2f), pal::bgAlt);
     auto qi = q.reduced (10.0f);
-    {
-        juce::String t;
-        t << (juce::juce_wchar) 1 << " LOUDNESS QUEST " << (juce::juce_wchar) 1;
-        drawTextIn (g, t, qi.removeFromTop (22.0f), juce::Justification::centred, 2.0f, pal::yellow, true);
-    }
+    drawTextIn (g, "LOUDNESS TARGET", qi.removeFromTop (22.0f), juce::Justification::centred, 2.0f, pal::yellow, true);
     qi.removeFromTop (36.0f);   // target box + reset button live here
 
-    // lives: hearts lost by overshooting the ceiling / clipping (true peak max hold)
-    const float ceil = processor.apvts.getRawParameterValue ("lmCeiling")->load();
-    const int hearts = truePeak <= ceil + 0.05f ? 3 : (truePeak <= 0.0f ? 2 : (truePeak <= 1.0f ? 1 : 0));
-    {
-        auto row = qi.removeFromTop (18.0f);
-        label (row, "LIVES", pal::text);
-        juce::String h;
-        for (int i = 0; i < 3; ++i)
-            h << (juce::juce_wchar) 2 << " ";
-        auto heartsArea = row.removeFromRight (textWidth (h.trimEnd(), 2.0f));
-        for (int i = 0; i < 3; ++i)
-        {
-            juce::String one;
-            one << (juce::juce_wchar) 2;
-            drawText (g, one, heartsArea.getX() + (float) i * 24.0f, heartsArea.getCentreY() - 7.0f, 2.0f,
-                      i < hearts ? pal::red : pal::edgeDark.brighter (0.5f));
-        }
-    }
-    qi.removeFromTop (8.0f);
+    const bool hasSignal = lufsS > cf::LoudnessMeter::kFloor + 0.05f;
+    auto luText = [] (float d) { return (d >= 0.0f ? "+" : "") + juce::String (d, 1) + " LU"; };
+    auto luColour = [] (float d) { return std::abs (d) <= 1.0f ? pal::green : (d > 0.0f ? pal::red : pal::cyan); };
 
-    // progress: 30 seconds in the zone clears the stage
-    constexpr double goal = 30.0;
-    const float progress = (float) juce::jlimit (0.0, 1.0, zoneSeconds / goal);
+    for (int i = 0; i < 2; ++i)
     {
+        const float v = i == 0 ? lufsS : lufsI;
+        const bool valid = v > cf::LoudnessMeter::kFloor + 0.05f;
         auto row = qi.removeFromTop (14.0f);
-        label (row, "IN THE ZONE", pal::text);
-        const int secs = (int) zoneSeconds;
-        value (row, juce::String (secs / 60) + ":" + juce::String (secs % 60).paddedLeft ('0', 2), pal::green, 1.5f);
-        qi.removeFromTop (4.0f);
-        segmentBar (g, qi.removeFromTop (12.0f), U, progress, pal::green, pal::green, pal::yellow, 0.99f, 1.0f);
+        label (row, i == 0 ? "SHORT-TERM" : "INTEGRATED", pal::text);
+        value (row, valid ? luText (v - target) : juce::String ("--"), valid ? luColour (v - target) : pal::dim, 1.5f);
+        qi.removeFromTop (6.0f);
+    }
+
+    // deviation bar: the centre line is the target, +-6 LU either side
+    {
+        auto bar = qi.removeFromTop (14.0f);
+        bevel (g, bar, U, pal::bgAlt, true);
+        auto inner = bar.reduced (U);
+        const float mid = std::round (inner.getCentreX() / U) * U;
+        g.setColour (pal::green.withAlpha (0.25f));
+        g.fillRect (snap (inner.withLeft (mid - inner.getWidth() / 12.0f).withRight (mid + inner.getWidth() / 12.0f)));
+        if (hasSignal)
+        {
+            const float d = juce::jlimit (-6.0f, 6.0f, lufsS - target);
+            const float x = std::round ((mid + d / 6.0f * inner.getWidth() * 0.5f) / U) * U;
+            g.setColour (luColour (lufsS - target));
+            g.fillRect (snap (inner.withLeft (juce::jmin (mid, x)).withRight (juce::jmax (mid, x) + U)));
+        }
+        g.setColour (pal::edgeLight);
+        g.fillRect (mid, inner.getY(), U, inner.getHeight());
     }
     qi.removeFromTop (10.0f);
 
-    juce::String msg;
-    juce::Colour msgColour = pal::dim;
-    if (progress >= 1.0f && hearts == 3)
+    // true peak against the limiter ceiling
     {
-        msg = "STAGE CLEAR!";
-        msgColour = (frame / 8) % 2 == 0 ? pal::yellow : pal::green;
+        const float ceil = processor.apvts.getRawParameterValue ("lmCeiling")->load();
+        const float over = truePeak - ceil;
+        auto row = qi.removeFromTop (14.0f);
+        label (row, "PEAK VS CEILING", pal::text);
+        if (truePeak <= -99.0f)
+            value (row, "--", pal::dim, 1.5f);
+        else
+            value (row, over > 0.05f ? "OVER +" + juce::String (over, 1) + " DB" : juce::String ("OK"),
+                   over > 0.05f ? pal::red : pal::green, 1.5f);
     }
-    else if (lufsS <= cf::LoudnessMeter::kFloor + 0.05f) { msg = "PRESS PLAY"; }
-    else if (std::abs (lufsS - target) <= 1.0f)          { msg = "IN THE ZONE"; msgColour = pal::green; }
-    else if (lufsS < target)                             { msg = "TOO QUIET \x05"; msgColour = pal::cyan; }
-    else                                                 { msg = "TOO LOUD \x03"; msgColour = pal::red; }
-
-    drawTextIn (g, msg, qi.removeFromTop (22.0f), juce::Justification::centred, 2.0f, msgColour, true);
 }
 //==============================================================================
 LfoScope::LfoScope (ColorForgeAudioProcessor& p, int lfoIndex, juce::Colour c)

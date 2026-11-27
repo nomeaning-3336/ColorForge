@@ -25,7 +25,7 @@ Every module has its own bypass, and every control is a host parameter, so all o
 | **A/B** | Two snapshots for comparing settings; the preset menu copies one into the other. Kept for the session, not saved with the project. |
 | **Chain order** | Drag EQ, COMP, SAT and STEREO around on the DYNAMICS page's signal-path map. The order is saved with the session and in presets. |
 | **Modulation** | MOD page: two LFOs (sine, triangle, saws, square, random; free in Hz or synced to the host tempo from 4 bars to 1/16), an envelope follower on the input, and four macro knobs. An 8-slot matrix routes any of them to 38 targets (EQ gains and frequencies, compressor, saturator, width, limiter gain, levels and the color FX). Knobs show a white pip where modulation is taking them; the knob itself (and its automation) stays where you set it. |
-| **Loudness quest** | Pick a target (club, loud, streaming -14, podcast, broadcast). Keep the short-term loudness within 1 LU of it for 30 seconds without overshooting the ceiling to clear the stage. |
+| **Loudness target** | Pick a target (club, loud, streaming -14, podcast, broadcast) and the STATUS column shows how many LU the short-term and integrated loudness sit from it, plus whether the true peak went over the limiter ceiling. |
 
 ### Color FX (the original ColorForge chain)
 
