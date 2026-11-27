@@ -952,7 +952,7 @@ public:
     PlayerApplication() = default;
 
     const juce::String getApplicationName() override        { return "ColorForge Player"; }
-    const juce::String getApplicationVersion() override     { return "2.0.0"; }
+    const juce::String getApplicationVersion() override     { return "2.1.0"; }
     bool moreThanOneInstanceAllowed() override              { return true; }
 
     void initialise (const juce::String& commandLine) override
