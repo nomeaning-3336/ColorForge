@@ -276,8 +276,7 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TransientMeter)
 };
 
-//==============================================================================
-/** Short-term loudness over the last minute, with the target zone. */
+//=======================================================================/** Short-term loudness over the last minute, with the target zone. */
 class LoudnessHistory : public juce::Component
 {
 public:
