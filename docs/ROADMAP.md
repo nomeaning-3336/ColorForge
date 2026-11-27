@@ -2,8 +2,8 @@
 
 Goal: one VST3 (plus the standalone player) that can take a track or a full mix from raw to
 release-ready, while keeping the color-bass chain as one of its modules. Every control is a host
-parameter, so all of it can be automated in a DAW. The interface gets an original 8-bit, game-style
-look.
+parameter, so all of it can be automated in a DAW. The interface gets an original 8-bit pixel look
+(visual theme only, no game mechanics).
 
 ## What the popular tools offer
 
@@ -39,7 +39,7 @@ Each phase ships as its own pull request and keeps the MinGW build working.
 - **Loudness meters**: LUFS momentary, short-term and integrated (BS.1770 K-weighting), true peak, stereo correlation, gain reduction.
 - **Input gain, mono-bass below a frequency, master bypass per module.**
 - **No pitch-map latency when the pitch map is off** (it currently adds about 85 ms even when off).
-- **8-bit game UI**: pixel font, pixel knobs and switches, a limited palette, tabbed "worlds" (COLOR, EQ, DYNAMICS, MASTER), HP-bar style meters and a loudness-target "quest" readout.
+- **8-bit pixel UI**: pixel font, pixel knobs and switches, a limited palette, tabbed pages (COLOR, EQ, DYNAMICS, MASTER), segment-bar meters and a loudness-target readout.
 
 ### Phase 2: workflow (done, PRs #2 and #3)
 - Done: factory presets (mix bus, master, vocal, drums, color bass) and user presets on disk.
@@ -50,10 +50,10 @@ Each phase ships as its own pull request and keeps the MinGW build working.
 - Done: level-matched bypass.
 - Done: movable crossovers and band solo on the OTT.
 
-### Phase 3: modulation & automation in the standalone program
+### Phase 3: modulation & automation in the standalone program (done, PRs #4 and #6)
 - Done: two LFOs and an envelope follower with tempo sync, routed through an 8-slot matrix to 38 targets.
 - Done: four macro knobs.
-- Automation lanes in the standalone player: record knob moves while the file loops, play them back, and render them in Export and `--render`.
+- Done: automation lanes in the standalone player: touch-record knob moves while the file loops, play them back, draw on them, and render them in Export and `--render`.
 
 ### Phase 4: more processors
 - Transient shaper, gate / expander, de-esser.
@@ -65,5 +65,4 @@ Each phase ships as its own pull request and keeps the MinGW build working.
 ### Phase 5: assistants and polish
 - Reference-track spectrum match and loudness match in the player.
 - "Starting point" chain suggestions from the analyzed spectrum.
-- Achievements and other game layers in the UI (for example a badge for hitting a loudness target without clipping).
 - CI builds for every PR, a smoke test in a DAW, and an installer.

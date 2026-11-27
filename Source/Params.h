@@ -69,7 +69,7 @@ inline juce::String eqId (int band, const char* suffix)
     return "eq" + juce::String (band + 1) + suffix;
 }
 
-/** Loudness targets for the "quest" readout (LUFS integrated). */
+/** Loudness targets for the status readout (LUFS). */
 struct LoudnessTarget { const char* name; float lufs; };
 inline constexpr LoudnessTarget kLoudnessTargets[] =
 {
