@@ -56,7 +56,9 @@ Each phase ships as its own pull request and keeps the MinGW build working.
 - Done: automation lanes in the standalone player: touch-record knob moves while the file loops, play them back, draw on them, and render them in Export and `--render`.
 
 ### Phase 4: more processors
-- Transient shaper, gate / expander, de-esser.
+- Done (2.2): transient shaper (attack / sustain).
+- Gate / expander, de-esser.
+- Spectral repair (box a whine on a spectrogram and turn it down): prototyped for 2.2 and parked. See [spectral-repair-prototype.md](research/spectral-repair-prototype.md).
 - Tempo-synced stereo delay.
 - Better reverb (pre-delay, decay time, tail EQ).
 - Multiband stereo width.

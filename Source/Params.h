@@ -130,6 +130,8 @@ inline constexpr ModTarget kModTargets[] =
     { "rvSize",     "REVERB SIZE" },
     { "rvMix",      "REVERB MIX" },
     { "ottDepth",   "OTT DEPTH" },
+    { "trAttack",   "TRANS ATTACK" },
+    { "trSustain",  "TRANS SUSTAIN" },
 };
 inline constexpr int kNumModTargets = (int) (sizeof (kModTargets) / sizeof (kModTargets[0]));
 
@@ -178,6 +180,8 @@ inline juce::String modId (int slot, const char* suffix)
 // Version 5:
 //   LFOs      : lfo1/lfo2 Shape Rate Sync Div    Envelope: envAttack envRelease envGain
 //   Macros    : macro1..macro4                   Matrix: mod1..mod8 Src Dst Amt
+// Version 6:
+//   Transient : trOn trAttack trSustain trMix trOut
 inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
     using namespace juce;
@@ -408,6 +412,15 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
                        NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%");
         }
     }
+
+    // =========================================================================
+    // Version 6: transient shaper
+    ver = 6;
+    addBool  ("trOn", "Transient On", false);
+    addFloat ("trAttack", "Transient Attack", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%");
+    addFloat ("trSustain", "Transient Sustain", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%");
+    addPct   ("trMix", "Transient Mix", 100.0f);
+    addFloat ("trOut", "Transient Output", NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, "dB");
 
     return layout;
 }

@@ -17,6 +17,7 @@
 #include "dsp/ParametricEQ.h"
 #include "dsp/Compressor.h"
 #include "dsp/Saturator.h"
+#include "dsp/TransientShaper.h"
 #include "dsp/StereoImager.h"
 #include "dsp/Limiter.h"
 #include "dsp/LoudnessMeter.h"
@@ -113,6 +114,8 @@ public:
     /** Output loudness / peak / correlation meters (post limiter). */
     cf::LoudnessMeter meter;
     float getCompGainReductionDb() const noexcept           { return comp.grDb.load (std::memory_order_relaxed); }
+    /** Largest transient-shaper boost and cut since the last call, in dB (UI thread). */
+    std::pair<float, float> takeTransientGainDb() noexcept  { return trans.takeGainRangeDb(); }
     float getLimiterGainReductionDb() const noexcept        { return limiter.grDb.load (std::memory_order_relaxed); }
     float getEqAppliedGainDb (int band) const noexcept      { return eq.getAppliedGainDb (band); }
     /** Gain applied to the dry signal while the level-matched bypass is on (dB). */
@@ -155,8 +158,8 @@ public:
     void copyActiveToOtherSlot();
     int getActiveSlot() const noexcept                      { return abActive; }
 
-    // Mix chain order: EQ, COMP, SAT and STEREO in any order (message thread)
-    enum ChainModule { modEq = 0, modComp, modSat, modStereo, numChainModules };
+    // Mix chain order: TRANS, EQ, COMP, SAT and STEREO in any order (message thread)
+    enum ChainModule { modEq = 0, modComp, modSat, modStereo, modTrans, numChainModules };
     std::array<int, numChainModules> getChainOrder() const noexcept;
     void setChainOrder (const std::array<int, numChainModules>&);
     static const char* chainModuleName (int module) noexcept;
@@ -196,6 +199,7 @@ private:
         std::atomic<float> *satOn, *satMode, *satDrive, *satTone, *satMix, *satOut;
         std::atomic<float> *imgOn, *imgWidth, *imgMonoOn, *imgMonoFreq, *imgBalance;
         std::atomic<float> *lmMode, *lmGain, *lmCeiling, *lmRelease;
+        std::atomic<float> *trOn, *trAttack, *trSustain, *trMix, *trOut;   // v6
 
         // v5: modulation
         std::atomic<float> *lfoShape[2], *lfoRate[2], *lfoSync[2], *lfoDiv[2];
@@ -247,6 +251,7 @@ private:
     cf::ParametricEQ eq;
     cf::Compressor comp;
     cf::Saturator sat;
+    cf::TransientShaper trans;
     cf::StereoImager imager;
     cf::Limiter limiter;
 
@@ -271,7 +276,7 @@ private:
     bool reverbOn = true, reverbWasOn = true;
     bool colorOn = false, pitchMapActive = false;   // pitch map latency only while it is in use
 
-    std::atomic<int> chainPacked { 0 | (1 << 2) | (2 << 4) | (3 << 6) };   // 2 bits per slot
+    std::atomic<int> chainPacked { 4 | (0 << 3) | (1 << 6) | (2 << 9) | (3 << 12) };   // 3 bits per slot
     int currentProgram = 0;
     juce::ValueTree abSlots[2];
     int abActive = 0;

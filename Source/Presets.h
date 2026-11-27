@@ -13,7 +13,7 @@ struct FactoryPreset
 {
     const char* name;
     std::initializer_list<std::pair<const char*, float>> values;
-    const char* chain = "EQ,COMP,SAT,STEREO";
+    const char* chain = "TRANS,EQ,COMP,SAT,STEREO";
 };
 
 /** Starting points, not finished sounds: tune them by ear on your material. */
@@ -60,6 +60,7 @@ inline const FactoryPreset kFactoryPresets[] =
         { "cpOn", 1 }, { "cpThresh", -24 }, { "cpRatio", 4 }, { "cpAttack", 20 }, { "cpRelease", 80 },
         { "cpKnee", 2 }, { "cpMix", 60 },
         { "satOn", 1 }, { "satMode", 2 }, { "satDrive", 6 }, { "satMix", 35 },
+        { "trOn", 1 }, { "trAttack", 40 }, { "trSustain", -15 },
         { "lmCeiling", -1 } } },
 
     { "WARM TAPE", {

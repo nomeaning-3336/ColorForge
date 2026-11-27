@@ -1188,6 +1188,58 @@ void CompDisplay::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+TransientMeter::TransientMeter (ColorForgeAudioProcessor& p) : processor (p)
+{
+    setInterceptsMouseClicks (false, false);
+}
+
+void TransientMeter::update()
+{
+    history[(size_t) writePos] = processor.takeTransientGainDb();
+    writePos = (writePos + 1) % (int) history.size();
+    repaint();
+}
+
+void TransientMeter::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    screen (g, r);
+    auto inner = r.reduced (6.0f, 4.0f);
+    auto label = inner.removeFromRight (64.0f);
+
+    float up = 0.0f, down = 0.0f;   // peaks over the last half second, for the readout
+    for (int i = 1; i <= 15; ++i)
+    {
+        const auto& h = history[(size_t) ((writePos + (int) history.size() - i) % (int) history.size())];
+        up = juce::jmax (up, h.first);
+        down = juce::jmin (down, h.second);
+    }
+    const bool cutWins = -down > up;
+    const float shown = cutWins ? down : up;
+    drawTextIn (g, (shown >= 0.0f ? "+" : "") + juce::String (shown, 1) + " DB", label, juce::Justification::centredRight,
+                1.5f, std::abs (shown) < 0.05f ? pal::dim : (cutWins ? pal::red : pal::green));
+
+    const float mid = std::floor (inner.getCentreY() / U) * U;
+    const float half = inner.getHeight() * 0.5f;
+    const float colW = inner.getWidth() / (float) history.size();
+    juce::RectangleList<float> boosts, cuts;
+    for (size_t i = 0; i < history.size(); ++i)
+    {
+        const auto& v = history[(i + (size_t) writePos) % history.size()];
+        const float x = inner.getX() + std::floor ((float) i * colW), w = juce::jmax (U, std::floor (colW));
+        const float hu = std::floor (juce::jlimit (0.0f, 1.0f, v.first / 12.0f) * half / U) * U;
+        const float hd = std::floor (juce::jlimit (0.0f, 1.0f, -v.second / 12.0f) * half / U) * U;
+        if (hu > 0.0f) boosts.addWithoutMerging ({ x, mid - hu, w, hu });
+        if (hd > 0.0f) cuts.addWithoutMerging ({ x, mid, w, hd });
+    }
+    dottedHLine (g, mid, inner.getX(), inner.getRight(), pal::edgeMid.withAlpha (0.6f));
+    g.setColour (pal::green);
+    g.fillRectList (boosts);
+    g.setColour (pal::red);
+    g.fillRectList (cuts);
+}
+
+//==============================================================================
 LoudnessHistory::LoudnessHistory (ColorForgeAudioProcessor& p) : processor (p)
 {
     history.fill (-70.0f);
@@ -1400,8 +1452,8 @@ int SignalPath::moduleAtNode (int node) const
     {
         case 0: return -1;
         case 1: return -2;
-        case 6: return -3;
-        case 7: return -4;
+        case 7: return -3;
+        case 8: return -4;
         default: return processor.getChainOrder()[(size_t) (node - 2)];
     }
 }
@@ -1417,10 +1469,10 @@ void SignalPath::layoutNodes()
     inner.removeFromTop (30.0f);
     hintArea = inner.removeFromBottom (14.0f);
 
-    // two rows, snaking like a level map
-    constexpr int perRow = 4;
+    // three rows, snaking like a level map
+    constexpr int perRow = 3;
     const float cellW = inner.getWidth() / (float) perRow;
-    const float rowH = juce::jmin (90.0f, inner.getHeight() / 2.0f);
+    const float rowH = juce::jmin (80.0f, inner.getHeight() / 3.0f);
 
     for (int i = 0; i < kNodes; ++i)
     {
@@ -1441,7 +1493,7 @@ int SignalPath::nodeAt (juce::Point<float> pos) const
 void SignalPath::mouseDown (const juce::MouseEvent& e)
 {
     const int n = nodeAt (e.position);
-    dragNode = (n >= 2 && n <= 5) ? n : -1;
+    dragNode = (n >= 2 && n <= 6) ? n : -1;
     dragPos = e.position;
 }
 
@@ -1457,7 +1509,7 @@ void SignalPath::mouseUp (const juce::MouseEvent& e)
 {
     const int target = nodeAt (e.position);
 
-    if (dragNode >= 2 && target >= 2 && target <= 5 && target != dragNode)
+    if (dragNode >= 2 && target >= 2 && target <= 6 && target != dragNode)
     {
         auto order = processor.getChainOrder();
         const int moved = order[(size_t) dragNode - 2];
@@ -1494,6 +1546,7 @@ void SignalPath::paint (juce::Graphics& g)
             case ColorForgeAudioProcessor::modEq:   return { "EQ",     "eqOn",  pal::yellow };
             case ColorForgeAudioProcessor::modComp: return { "COMP",   "cpOn",  pal::orange };
             case ColorForgeAudioProcessor::modSat:  return { "SAT",    "satOn", pal::red };
+            case ColorForgeAudioProcessor::modTrans: return { "TRANS", "trOn",  pal::green };
             default:                                return { "STEREO", "imgOn", pal::blue };
         }
     };
@@ -1517,7 +1570,7 @@ void SignalPath::paint (juce::Graphics& g)
         const bool active = on (n.id);
         auto box = nodeBoxes[(size_t) i];
 
-        if (dragNode >= 0 && i == hover && i != dragNode && i >= 2 && i <= 5)
+        if (dragNode >= 0 && i == hover && i != dragNode && i >= 2 && i <= 6)
             fillBox (g, box.expanded (3 * U), U, pal::yellow);
 
         if (active)
@@ -1528,7 +1581,7 @@ void SignalPath::paint (juce::Graphics& g)
         drawTextIn (g, n.name, box.reduced (4.0f, 0.0f), juce::Justification::centred, 2.0f,
                     active ? pal::edgeDark : pal::dim);
 
-        if (i >= 2 && i <= 5)   // movable: little grip marks
+        if (i >= 2 && i <= 6)   // movable: little grip marks
         {
             g.setColour ((active ? pal::edgeDark : pal::dim).withAlpha (0.6f));
             g.fillRect (std::round (box.getX() + 3 * U), std::round (box.getCentreY() - 2 * U), U, U);
@@ -2065,10 +2118,15 @@ ColorForgeAudioProcessorEditor::ColorForgeAudioProcessorEditor (ColorForgeAudioP
     compDisplay = std::make_unique<CompDisplay> (audioProcessor);
     compPanel->addAndMakeVisible (*compDisplay);
     satPanel = std::make_unique<FxPanel> (apvts, "SATURATOR", pal::red, "satOn", "satMode", std::vector<ToggleSpec> {},
-        std::vector<KnobSpec> { { "satDrive", "DRIVE" }, { "satTone", "TONE" }, { "satMix", "MIX" }, { "satOut", "OUTPUT" } }, 4);
+        std::vector<KnobSpec> { { "satDrive", "DRIVE" }, { "satTone", "TONE" }, { "satMix", "MIX" }, { "satOut", "OUTPUT" } }, 2);
+    transPanel = std::make_unique<FxPanel> (apvts, "TRANSIENT", pal::green, "trOn", nullptr, std::vector<ToggleSpec> {},
+        std::vector<KnobSpec> { { "trAttack", "ATTACK" }, { "trSustain", "SUSTAIN" }, { "trMix", "MIX" }, { "trOut", "OUTPUT" } }, 2, 30);
+    transMeter = std::make_unique<TransientMeter> (audioProcessor);
+    transPanel->addAndMakeVisible (*transMeter);
     signalPath = std::make_unique<SignalPath> (audioProcessor);
     addTo (pageDynamics, compPanel.get());
     addTo (pageDynamics, satPanel.get());
+    addTo (pageDynamics, transPanel.get());
     addTo (pageDynamics, signalPath.get());
 
     // ---- MASTER
@@ -2147,7 +2205,7 @@ void ColorForgeAudioProcessorEditor::timerCallback()
 
     if (currentPage == pageColor) analyzer->update();
     if (currentPage == pageEq)    eqGraph->update();
-    if (currentPage == pageDynamics) { compDisplay->update(); signalPath->repaint(); }
+    if (currentPage == pageDynamics) { compDisplay->update(); transMeter->update(); signalPath->repaint(); }
     if (currentPage == pageMod)
     {
         lfoScopes[0]->update();
@@ -2281,7 +2339,11 @@ void ColorForgeAudioProcessorEditor::resized()
         compPanel->setBounds (c.removeFromTop (430));
         compDisplay->setBounds (compPanel->getDisplayArea());
         c.removeFromTop (gap);
-        satPanel->setBounds (c.removeFromLeft (560));
+        const int w = (c.getWidth() - 2 * gap) * 3 / 10;
+        satPanel->setBounds (c.removeFromLeft (w));
+        c.removeFromLeft (gap);
+        transPanel->setBounds (c.removeFromLeft (w));
+        transMeter->setBounds (transPanel->getDisplayArea());
         c.removeFromLeft (gap);
         signalPath->setBounds (c);
     }

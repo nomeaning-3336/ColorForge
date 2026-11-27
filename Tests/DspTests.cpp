@@ -513,10 +513,12 @@ void testPresetsAndChain()
     set ("eq2Gain", 18.0f); set ("eq2Freq", 100.0f); set ("limit", 0.0f);
 
     proc.setChainOrder ({ ColorForgeAudioProcessor::modEq, ColorForgeAudioProcessor::modComp,
-                          ColorForgeAudioProcessor::modSat, ColorForgeAudioProcessor::modStereo });
+                          ColorForgeAudioProcessor::modSat, ColorForgeAudioProcessor::modStereo,
+                          ColorForgeAudioProcessor::modTrans });
     const double eqFirst = render();
     proc.setChainOrder ({ ColorForgeAudioProcessor::modSat, ColorForgeAudioProcessor::modComp,
-                          ColorForgeAudioProcessor::modEq, ColorForgeAudioProcessor::modStereo });
+                          ColorForgeAudioProcessor::modEq, ColorForgeAudioProcessor::modStereo,
+                          ColorForgeAudioProcessor::modTrans });
     const double satFirst = render();
     check (std::abs (eqFirst - satFirst) > 3.0, "Chain order changes the sound (EQ>SAT vs SAT>EQ)", satFirst - eqFirst, "dB difference");
     check (proc.getChainOrder()[0] == ColorForgeAudioProcessor::modSat, "Chain order is read back", proc.getChainOrder()[0], "first module");
@@ -528,6 +530,116 @@ void testPresetsAndChain()
     other.setStateInformation (state.getData(), (int) state.getSize());
     check (other.getChainOrder()[0] == ColorForgeAudioProcessor::modSat, "Chain order is saved with the session",
            other.getChainOrder()[0], "first module after reload");
+}
+
+//==============================================================================
+/** Decaying noise hits, one every 250 ms: 'amp' sets the level. */
+std::vector<float> drumHits (double amp, int num)
+{
+    std::vector<float> v ((size_t) num);
+    std::mt19937 rng (7);
+    std::uniform_real_distribution<float> u (-1.0f, 1.0f);
+    const int period = (int) (0.25 * kSr);
+    for (int i = 0; i < num; ++i)
+    {
+        const double t = (double) (i % period) / kSr;
+        v[(size_t) i] = (float) (amp * std::exp (-t / 0.06) * u (rng));
+    }
+    return v;
+}
+
+/** Energy (dB) of the onsets (first 4 ms of each hit) and of the tails (60..200 ms), skipping the first hit. */
+std::pair<double, double> onsetAndTailDb (const std::vector<float>& v)
+{
+    const int period = (int) (0.25 * kSr);
+    double on = 0.0, tail = 0.0;
+    for (int i = period; i < (int) v.size(); ++i)
+    {
+        const double t = (double) (i % period) / kSr;
+        const double e = (double) v[(size_t) i] * v[(size_t) i];
+        if (t < 0.004) on += e;
+        else if (t > 0.06 && t < 0.2) tail += e;
+    }
+    return { 10.0 * std::log10 (on + 1.0e-30), 10.0 * std::log10 (tail + 1.0e-30) };
+}
+
+void testTransientShaper()
+{
+    auto run = [] (double amp, float attack, float sustain, bool on = true)
+    {
+        cf::TransientShaper t;
+        t.prepare (kSr);
+        cf::TransientShaper::Params p;
+        p.on = on; p.attack = attack; p.sustain = sustain;
+        t.setParams (p);
+        t.reset();
+        auto l = drumHits (amp, 48000 * 3), r = l;
+        inChunks (l, r, [&] (float* a, float* b, int n) { t.process (a, b, n); });
+        return l;
+    };
+
+    const auto dry = onsetAndTailDb (drumHits (0.5, 48000 * 3));
+    auto change = [&dry] (const std::vector<float>& v)
+    {
+        const auto w = onsetAndTailDb (v);
+        return std::make_pair (w.first - dry.first, w.second - dry.second);
+    };
+
+    const auto attUp = change (run (0.5, 1.0f, 0.0f));
+    const auto attDown = change (run (0.5, -1.0f, 0.0f));
+    const auto susUp = change (run (0.5, 0.0f, 1.0f));
+    const auto susDown = change (run (0.5, 0.0f, -1.0f));
+
+    check (attUp.first - attUp.second > 4.0, "Transient: ATTACK +100 lifts onsets over tails", attUp.first - attUp.second, "dB onset vs tail");
+    check (attDown.first - attDown.second < -4.0, "Transient: ATTACK -100 softens onsets", attDown.first - attDown.second, "dB onset vs tail");
+    check (susUp.second > 3.0 && std::abs (susUp.first) < 1.5, "Transient: SUSTAIN +100 lifts tails only", susUp.second, "dB on tails");
+    check (susDown.second < -3.0 && std::abs (susDown.first) < 1.5, "Transient: SUSTAIN -100 shortens tails", susDown.second, "dB on tails");
+
+    // no threshold: the same settings do the same thing 26 dB quieter
+    {
+        const auto quietDry = onsetAndTailDb (drumHits (0.025, 48000 * 3));
+        const auto quiet = onsetAndTailDb (run (0.025, 1.0f, 0.0f));
+        const double loud = attUp.first - attUp.second;
+        const double q = (quiet.first - quietDry.first) - (quiet.second - quietDry.second);
+        check (std::abs (loud - q) < 0.5, "Transient: works the same at -26 dB", loud - q, "dB difference");
+    }
+
+    // at zero, or switched off, it leaves the audio alone
+    {
+        const auto ref = drumHits (0.5, 48000 * 3);
+        double worst = 0.0, worstOff = 0.0;
+        const auto zero = run (0.5, 0.0f, 0.0f), off = run (0.5, 1.0f, 1.0f, false);
+        for (size_t i = 0; i < ref.size(); ++i)
+        {
+            worst = std::max (worst, (double) std::abs (zero[i] - ref[i]));
+            worstOff = std::max (worstOff, (double) std::abs (off[i] - ref[i]));
+        }
+        check (worst < 1.0e-6, "Transient: neutral at 0 / 0", worst, "max sample error");
+        check (worstOff == 0.0, "Transient: bit-exact when off", worstOff, "max sample error");
+    }
+
+    // a steady tone has no transients, so ATTACK leaves it at unity once settled
+    {
+        cf::TransientShaper t;
+        t.prepare (kSr);
+        cf::TransientShaper::Params p;
+        p.on = true; p.attack = 1.0f; p.sustain = 1.0f;
+        t.setParams (p);
+        t.reset();
+        auto l = sine (220.0, 0.3, 48000 * 2), r = l;
+        const double before = rmsDb (l, 48000);
+        inChunks (l, r, [&] (float* a, float* b, int n) { t.process (a, b, n); });
+        check (std::abs (rmsDb (l, 48000) - before) < 0.5, "Transient: steady tone left at unity", rmsDb (l, 48000) - before, "dB change");
+    }
+
+    // sessions from before 2.2 have no TRANS slot: it goes first
+    {
+        ColorForgeAudioProcessor proc;
+        proc.apvts.state.setProperty (ColorForgeAudioProcessor::kChainProp, "SAT,COMP,EQ,STEREO", nullptr);
+        const auto order = proc.getChainOrder();
+        check (order[0] == ColorForgeAudioProcessor::modTrans && order[1] == ColorForgeAudioProcessor::modSat,
+               "Transient: old chain gets TRANS first", order[0], "first module");
+    }
 }
 
 /** Renders each editor page to a PNG after feeding the processor some audio. */
@@ -549,6 +661,7 @@ int snapshot (const juce::File& dir)
         setParam ("eq2Gain", 3.0f);       setParam ("eq4Gain", -4.0f);     setParam ("eq4Q", 2.0f);
         setParam ("eq6Gain", 2.5f);       setParam ("eq1On", 1.0f);        setParam ("satOn", 1.0f);
         setParam ("lmGain", 6.0f);
+        setParam ("trOn", 1.0f);          setParam ("trAttack", 40.0f);    setParam ("trSustain", -20.0f);
         if (page == 0)
             setParam ("colorOn", 1.0f);
         // a couple of mod routings so the MOD page and the knob pips have something to show
@@ -617,6 +730,7 @@ int main (int argc, char** argv)
     testMatchedBypass();
     testModulation();
     testAutomation();
+    testTransientShaper();
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "OK" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

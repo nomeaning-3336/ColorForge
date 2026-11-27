@@ -8,7 +8,7 @@ More pages: [MOD](docs/screenshot-mod.png) · [MASTER](docs/screenshot-master.pn
 
 ## Signal chain
 
-`Input → Color FX → [EQ · Compressor · Saturator · Stereo, in any order] → Output → Limiter → Meters`
+`Input → Color FX → [Transient · EQ · Compressor · Saturator · Stereo, in any order] → Output → Limiter → Meters`
 
 Every module has its own bypass, and every control is a host parameter, so all of it can be automated in a DAW. The editor has five pages (COLOR, EQ, DYNAMICS, MASTER, MOD) and an always-visible STATUS column.
 
@@ -17,14 +17,15 @@ Every module has its own bypass, and every control is a host parameter, so all o
 | **EQ** | 8 bands: low cut and high cut (12 / 24 / 36 / 48 dB per octave), low and high shelf, four bells. Each band works on stereo, mid only or side only. The shelves and bells can be dynamic (DYN): the gain only kicks in when that band gets louder than its threshold (THR), reaching the full amount 12 dB above it, and a dotted trace shows what is applied right now. Drag the numbered dots on the graph (wheel = Q, double-click = on/off) over the live spectrum. |
 | **Compressor** | Stereo-linked bus compressor: threshold, ratio, attack, release, soft knee, makeup or auto gain, parallel mix, sidechain high-pass. Transfer curve and gain-reduction history. |
 | **Saturator** | Tape, tube and clip curves with drive, tilt tone, mix and output; the level is kept roughly constant as you drive it. |
+| **Transient** | Attack and sustain shaping (-100 to +100 %), mix and output. It follows the level rather than a threshold, so it behaves the same on quiet and loud material, and a steady tone passes untouched. A strip shows the boost and cut it applies. |
 | **Stereo** | Mid/side width, mono bass below a chosen frequency, balance. |
 | **Limiter** | Lookahead brickwall limiter with 4x true-peak detection: gain, ceiling (dBTP), release. `Clip` mode is the soft clipper from v1. About 1.6 ms of latency. |
 | **Meters** | Sample peak, LUFS momentary / short-term / integrated (BS.1770 / EBU R128 gating), true peak, phase correlation, compressor and limiter gain reduction, and a 60-second loudness map. |
 | **Presets** | Factory starting points (mix bus glue, streaming and club masters, vocal, drums, tape, wide + mono bass, the v1 color-bass sound) from the bar at the top right, plus your own presets saved as `.cfpreset` files in `Documents/ColorForge/Presets`. Hosts see the factory presets as programs. |
 | **Level-matched bypass** | BYPASS in the STATUS column plays the dry input, delayed to line up and raised or lowered to the processed loudness, so you hear what the processing does rather than "louder". |
 | **A/B** | Two snapshots for comparing settings; the preset menu copies one into the other. Kept for the session, not saved with the project. |
-| **Chain order** | Drag EQ, COMP, SAT and STEREO around on the DYNAMICS page's signal-path map. The order is saved with the session and in presets. |
-| **Modulation** | MOD page: two LFOs (sine, triangle, saws, square, random; free in Hz or synced to the host tempo from 4 bars to 1/16), an envelope follower on the input, and four macro knobs. An 8-slot matrix routes any of them to 38 targets (EQ gains and frequencies, compressor, saturator, width, limiter gain, levels and the color FX). Knobs show a white pip where modulation is taking them; the knob itself (and its automation) stays where you set it. |
+| **Chain order** | Drag TRANS, EQ, COMP, SAT and STEREO around on the DYNAMICS page's signal-path map. The order is saved with the session and in presets. |
+| **Modulation** | MOD page: two LFOs (sine, triangle, saws, square, random; free in Hz or synced to the host tempo from 4 bars to 1/16), an envelope follower on the input, and four macro knobs. An 8-slot matrix routes any of them to 40 targets (EQ gains and frequencies, compressor, saturator, transient attack and sustain, width, limiter gain, levels and the color FX). Knobs show a white pip where modulation is taking them; the knob itself (and its automation) stays where you set it. |
 | **Loudness target** | Pick a target (club, loud, streaming -14, podcast, broadcast) and the STATUS column shows how many LU the short-term and integrated loudness sit from it, plus whether the true peak went over the limiter ceiling. |
 
 ### Color FX (the original ColorForge chain)
